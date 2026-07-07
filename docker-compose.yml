@@ -1,0 +1,50 @@
+# =============================================================================
+# OpenCodeReview — Docker Compose
+# =============================================================================
+#
+# Quick start
+# -----------
+#   1. Set your API keys in a .env file:
+#         GROQ_API_KEY=gsk_your_key_here
+#         GITHUB_TOKEN=ghp_your_token_here
+#
+#   2. Build and run the smoke test:
+#         docker compose build
+#         docker compose run --rm opencodereview review --smoke
+#
+#   3. Review a real PR:
+#         docker compose run --rm opencodereview review --repo org/repo --pr 42
+#
+#   4. Run evaluation:
+#         docker compose run --rm opencodereview python eval_data/evaluate.py --max-prs 2
+#
+# Data persistence
+# ----------------
+#   The vector store (ChromaDB) is persisted in a named volume so embeddings
+#   don't need to be rebuilt every run.  The checkpoint database is ephemeral
+#   (cleaned up after each run by the app).
+# =============================================================================
+
+services:
+  opencodereview:
+    build: .
+    image: opencodereview:latest
+    entrypoint: ["python", "-m", "main"]
+    environment:
+      # AI provider keys
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OPENCODEREVIEW_ANTHROPIC_KEY=${OPENCODEREVIEW_ANTHROPIC_KEY:-}
+      # GitHub
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Language
+      - LANG=en_US.UTF-8
+    volumes:
+      # Persist vector store across runs
+      - opencodereview_vectors:/tmp/opencodereview_vectors
+      # Optionally mount config for keyring (useful on Linux)
+      # - ~/.local/share/keyring:/home/appuser/.local/share/keyring
+    profiles:
+      - cli
+
+volumes:
+  opencodereview_vectors:

@@ -1,0 +1,10 @@
+langgraph>=1.1
+pydantic>=2
+pydantic-settings>=2
+langgraph-checkpoint-sqlite>=3
+requests>=2.31
+keyring>=25
+click>=8.1
+gradio>=4.0
+langchain-groq
+chromadb
