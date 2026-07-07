@@ -334,22 +334,31 @@ details { margin-top: 8px; }
 details summary { cursor: pointer; color: #4b5563; font-weight: 500; }
 
 /* ── Theme toggle ─────────────────────────────────────────────────── */
-.theme-toggle-wrap {
-    display: flex; align-items: center; gap: 8px; margin-left: auto;
+.theme-toggle-row {
+    justify-content: flex-end !important;
+    margin-top: -40px !important;
+    margin-bottom: 8px !important;
 }
-.theme-toggle-btn {
-    background: none; border: 1px solid #d1d5db; border-radius: 8px;
-    padding: 6px 12px; cursor: pointer; font-size: 1.1em;
-    transition: all 0.2s ease;
+#theme-toggle-btn {
+    background: transparent !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 8px !important;
+    padding: 4px 10px !important;
+    font-size: 1.1em !important;
+    min-width: 44px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: none !important;
 }
-.theme-toggle-btn:hover {
-    background: #f3f4f6; border-color: #9ca3af;
+#theme-toggle-btn:hover {
+    background: #f3f4f6 !important;
+    border-color: #9ca3af !important;
 }
-body.dark-mode .theme-toggle-btn {
-    border-color: #4b5563; color: #f3f4f6;
+body.dark-mode #theme-toggle-btn {
+    border-color: #4b5563 !important;
+    color: #f3f4f6 !important;
 }
-body.dark-mode .theme-toggle-btn:hover {
-    background: #374151;
+body.dark-mode #theme-toggle-btn:hover {
+    background: #374151 !important;
 }
 
 /* ── Loading spinner ──────────────────────────────────────────────── */
@@ -368,30 +377,39 @@ body.dark-mode .theme-toggle-btn:hover {
 }
 """
 
+JS_RESTORE_THEME = """
+() => {
+    const isDark = localStorage.getItem("ocr-theme") === "dark";
+    if (isDark) document.body.classList.add("dark-mode");
+    const btn = document.querySelector("#theme-toggle-btn");
+    if (btn) btn.textContent = isDark ? "☀️" : "🌙";
+}
+"""
+
+JS_TOGGLE_THEME = """
+() => {
+    const isDark = document.body.classList.toggle("dark-mode");
+    localStorage.setItem("ocr-theme", isDark ? "dark" : "light");
+    const btn = document.querySelector("#theme-toggle-btn");
+    if (btn) btn.textContent = isDark ? "☀️" : "🌙";
+    return [];
+}
+"""
+
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
+    demo.load(js=JS_RESTORE_THEME)
+
     gr.HTML(
         '<div style="display:flex;align-items:center">'
         '<div><h1>🔍 OpenCodeReview</h1>'
         '<p style="color:var(--text-muted);margin-top:-8px">'
         'AI-powered PR review with human-in-the-loop approval</p></div>'
-        '<div class="theme-toggle-wrap">'
-        '<button class="theme-toggle-btn" onclick="toggleTheme()"'
-        ' title="Toggle dark mode" id="themeToggleBtn">🌙</button></div>'
         '</div>'
-        '<script>'
-        '(function(){'
-        '  const isDark = localStorage.getItem("ocr-theme") === "dark";'
-        '  if (isDark) document.body.classList.add("dark-mode");'
-        '  const btn = document.getElementById("themeToggleBtn");'
-        '  if (btn) btn.textContent = isDark ? "☀️" : "🌙";'
-        '})();'
-        'function toggleTheme(){'
-        '  const isDark = document.body.classList.toggle("dark-mode");'
-        '  localStorage.setItem("ocr-theme", isDark ? "dark" : "light");'
-        '  document.getElementById("themeToggleBtn").textContent = isDark ? "☀️" : "🌙";'
-        '}'
-        '</script>'
     )
+
+    with gr.Row(elem_classes="theme-toggle-row"):
+        theme_toggle = gr.Button("🌙", elem_id="theme-toggle-btn", size="sm", min_width=50)
+        theme_toggle.click(js=JS_TOGGLE_THEME)
 
     # ── State ────────────────────────────────────────────────────────────
     pr_state = gr.State()
