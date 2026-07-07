@@ -21,6 +21,20 @@ from langgraph.types import Command
 
 from graph import build_graph
 from main import _cleanup_db, SYNTHETIC_STATE
+from observability import (
+    build_run_metadata,
+    enable_langsmith,
+    get_langfuse_handler,
+    is_langfuse_enabled,
+    is_langsmith_enabled,
+    estimate_groq_cost,
+    format_cost,
+    log_error_to_backends,
+    HealthStatus,
+    TokenCostCallback,
+    check_groq_connectivity,
+    check_langfuse_connectivity,
+)
 from state import Verdict
 
 import subprocess
@@ -53,16 +67,46 @@ RECOMMENDATION_ICONS = {
 # ─── Orchestration ───────────────────────────────────────────────────────────
 
 
+def _init_observability_ui() -> None:
+    """Initialise observability backends from env vars for the Gradio UI."""
+    # LangSmith: enable if key is in environment
+    ls_key = os.environ.get("LANGCHAIN_API_KEY", "").strip()
+    if ls_key and not is_langsmith_enabled():
+        project = os.environ.get("LANGCHAIN_PROJECT", "opencodereview")
+        enable_langsmith(ls_key, project)
+    if is_langsmith_enabled():
+        logger.info("Observability: LangSmith enabled for Gradio UI")
+    if get_langfuse_handler():
+        logger.info("Observability: Langfuse enabled for Gradio UI")
+
+
 def _build_and_stream(repo: str, pr_number: int) -> tuple:
     """Build the graph, stream up to the interrupt, and return state + config."""
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": f"web-{thread_id}"}}
+    handler = get_langfuse_handler()
+    cost_tracker = TokenCostCallback()
+    metadata = build_run_metadata(
+        source="gradio_ui", repo=repo, pr_number=pr_number, session_id=thread_id,
+    )
+    config: dict = {
+        "configurable": {"thread_id": f"web-{thread_id}"},
+        "metadata": metadata,
+    }
+    callbacks = [cost_tracker]
+    if handler:
+        callbacks.append(handler)
+    config["callbacks"] = callbacks
 
-    initial = {"repo": repo, "pr_number": pr_number}
-    list(graph.stream(initial, config))
+    try:
+        initial = {"repo": repo, "pr_number": pr_number}
+        list(graph.stream(initial, config))
+    except Exception as exc:
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
+        raise
+
     state = graph.get_state(config)
-    return state, config
+    return state, config, cost_tracker.summary()
 
 
 def _format_findings_table(findings: list) -> str:
@@ -185,9 +229,9 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     progress(0.1, desc="Building graph…")
 
     try:
-        state, config = _build_and_stream(repo.strip(), pr_number)
+        state, config, cost_summary = _build_and_stream(repo.strip(), pr_number)
     except Exception as exc:
-        logger.exception("Review failed")
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
         yield [None, None, None, None], f"❌ Review failed: {exc}"
         return
 
@@ -206,7 +250,12 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     verdict_html = _format_verdict(verdict)
     findings_html = _format_findings_table(findings)
     count_html = _format_findings_count(findings)
-    config_json = json.dumps(config)
+    # Append cost info to count display
+    count_html += f'<p style="margin-top:8px;font-size:0.85em;color:var(--text-muted)">{cost_summary}</p>'
+    # Strip non-serializable callbacks before saving config to state
+    config_json = json.dumps(
+        {k: v for k, v in config.items() if k != "callbacks"}
+    )
 
     yield (
         [verdict_html, findings_html, count_html, config_json],
@@ -221,6 +270,12 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
 
     config = json.loads(config_json)
     graph = build_graph(DB_PATH)
+    handler = get_langfuse_handler()
+    cost_tracker = TokenCostCallback()
+    callbacks = [cost_tracker]
+    if handler:
+        callbacks.append(handler)
+    config.setdefault("callbacks", []).extend(callbacks)
 
     progress(0.3, desc=f"Processing {action}…")
 
@@ -233,9 +288,11 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
             if approved
             else "❌ Review **rejected**. No comments posted."
         )
+        if cost_tracker.usage:
+            msg += f" _{cost_tracker.summary()}_"
         return msg
     except Exception as exc:
-        logger.exception("Resume failed")
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "resume_review", "action": action})
         return f"❌ Error: {exc}"
 
 
@@ -246,10 +303,26 @@ def run_smoke(progress=gr.Progress()):
     progress(0.1, desc="Building graph…")
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": f"smoke-web-{thread_id}"}}
+    handler = get_langfuse_handler()
+    cost_tracker = TokenCostCallback()
+    metadata = build_run_metadata(
+        source="gradio_ui", repo="demo-org/demo-repo", pr_number=1, session_id=thread_id,
+    )
+    config: dict = {
+        "configurable": {"thread_id": f"smoke-web-{thread_id}"},
+        "metadata": metadata,
+    }
+    callbacks = [cost_tracker]
+    if handler:
+        callbacks.append(handler)
+    config["callbacks"] = callbacks
 
     progress(0.3, desc="Running on synthetic data…")
-    list(graph.stream(SYNTHETIC_STATE, config))
+    try:
+        list(graph.stream(SYNTHETIC_STATE, config))
+    except Exception as exc:
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "smoke_stream"})
+        raise
     state = graph.get_state(config)
     tasks = state.tasks
 
@@ -263,8 +336,13 @@ def run_smoke(progress=gr.Progress()):
     progress(0.8, desc="Formatting…")
     verdict_html = _format_verdict(verdict)
     findings_html = _format_findings_table(findings)
+    # Strip non-serializable callbacks before saving config to state
+    config_json = json.dumps(
+        {k: v for k, v in config.items() if k != "callbacks"}
+    )
+    cost_html = f'<p style="margin-top:8px;font-size:0.85em;color:var(--text-muted)">{cost_tracker.summary()}</p>'
 
-    yield [verdict_html, findings_html, json.dumps(config), verdict_html, findings_html], None
+    yield [verdict_html, findings_html + cost_html, config_json, verdict_html, findings_html], None
 
 
 
@@ -392,6 +470,9 @@ JS_TOGGLE_THEME = """
     return [];
 }
 """
+
+# ── Initialise observability backends ────────────────────────────────
+_init_observability_ui()
 
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     demo.load(js=JS_RESTORE_THEME)
@@ -604,17 +685,20 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
         )
 
     # ── Environment status footer ──────────────────────────────────────
-    with gr.Accordion("🔑 Configured Keys", open=False):
+    with gr.Accordion("🔑 Configured Keys & Health", open=False):
+        h = HealthStatus()
+        health_data = h.summary()
         groq_ok = bool(os.environ.get("GROQ_API_KEY", "").strip())
         gh_ok = bool(os.environ.get("GITHUB_TOKEN", "").strip())
-        groq_status = "✅ Set" if groq_ok else "❌ Not set — reviewers will be skipped"
-        gh_status = "✅ Set" if gh_ok else "❌ Not set — cannot fetch real PRs"
-        gr.HTML(
-            f"<ul>"
-            f"<li>GROQ_API_KEY: {groq_status}</li>"
-            f"<li>GITHUB_TOKEN: {gh_status}</li>"
-            f"</ul>"
-        )
+        ls_ok = h.langsmith
+        lf_ok = h.langfuse
+        lines = [
+            f"<li>GROQ_API_KEY: {'✅ Set' if groq_ok else '❌ Not set'}</li>",
+            f"<li>GITHUB_TOKEN: {'✅ Set' if gh_ok else '❌ Not set'}</li>",
+            f"<li>LangSmith: {health_data['LangSmith']}</li>",
+            f"<li>Langfuse: {health_data['Langfuse']}</li>",
+        ]
+        gr.HTML(f"<ul>" + "".join(lines) + "</ul>")
 
     # ── Footer ─────────────────────────────────────────────────────────
     _commit, _ts = _get_deploy_info()

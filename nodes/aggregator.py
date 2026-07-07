@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 
@@ -12,10 +14,33 @@ logger = logging.getLogger(__name__)
 GROQ_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.0
 
+# Prompt version — tied to the file on disk
+PROMPT_VERSION = "v1"
+PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"aggregator_{PROMPT_VERSION}.txt"
+
 # Findings below this confidence are dropped before the LLM step
 MIN_CONFIDENCE = 0.25
 # Files/line pairs within this many lines are considered duplicates
 LINE_TOLERANCE = 5
+
+
+# ─── Load prompt from file ──────────────────────────────────────────────────
+
+
+def _load_prompt() -> str:
+    """Load the system prompt from the versioned prompt file."""
+    try:
+        return PROMPT_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("Prompt file %s not found — using fallback", PROMPT_FILE)
+        return (
+            "You are a senior engineer acting as a critic of a code review. "
+            "Filter out noise, deduplicate findings, and produce a verdict. "
+            "Return the filtered list of findings plus your verdict."
+        )
+
+
+SYSTEM_PROMPT = _load_prompt()
 
 
 # ─── LLM output schema ──────────────────────────────────────────────────────
@@ -143,40 +168,6 @@ def _rule_summary(recommendation: str, counts: dict) -> str:
     return f"Approved: {body} — no significant issues."
 
 
-# ─── LLM prompt ─────────────────────────────────────────────────────────────
-
-
-SYSTEM_PROMPT = """You are a senior engineer acting as a **critic** of a code review.
-Your job is to look at the list of raw findings produced by automated reviewers
-and decide which ones are genuinely worth sharing with the PR author.
-
-Apply these rules strictly:
-
-1. **Deduplicate** — if two findings point at the same issue (same file,
-   overlapping lines, similar comment), keep only the more specific one.
-2. **Drop noise** — remove findings that are:
-   - Overly pedantic or stylistic (a senior engineer wouldn't mention them).
-   - Speculative with very low confidence (< 0.4).
-   - Vague or generic ("consider improving this code" without specifics).
-3. **Escalate appropriately** — if a finding is genuinely important but the
-   automated reviewer gave it a low severity, bump it up.  Conversely, if it's
-   a minor nitpick flagged as "critical", bump it down.
-4. **Produce a verdict** — based on the *filtered* set of findings, decide:
-   - `approve` — no significant issues, or only minor suggestions.
-   - `request_changes` — issues that should be addressed before merging.
-   - `block` — a critical bug that must not be merged.
-
-The verdict's `overall_score` should reflect how healthy the PR is:
-   - 9–10: clean, trivial suggestions only
-   - 7–8:  minor issues worth noting
-   - 5–6:  should fix before merging
-   - 3–4:  several problems, strongly consider rework
-   - 0–2:  critical, must not merge
-
-Return the filtered list of findings plus your verdict.
-"""
-
-
 # ─── Prompt builder ─────────────────────────────────────────────────────────
 
 
@@ -243,7 +234,10 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
 
     if api_key:
-        logger.info("Invoking aggregator LLM critic …")
+        logger.info(
+            "Invoking aggregator LLM critic (prompt_version=%s) …",
+            PROMPT_VERSION,
+        )
         try:
             llm = ChatGroq(
                 model=GROQ_MODEL,

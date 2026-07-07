@@ -69,6 +69,11 @@ class Settings(BaseSettings):
 
     anthropic_api_key: Optional[str] = Field(default=None)
 
+    # ── Langfuse observability (optional) ──────────────────────────────────
+    langfuse_public_key: Optional[str] = Field(default=None)
+    langfuse_secret_key: Optional[str] = Field(default=None)
+    langfuse_host: Optional[str] = Field(default=None)
+
     def model_post_init(self, __context) -> None:  # noqa: ANN101
         """After env-var resolution, fall back to keyring for any unset values."""
         for keyring_key, _, _ in PROVIDERS.values():
@@ -89,6 +94,61 @@ class Settings(BaseSettings):
                 "    export OPENCODEREVIEW_ANTHROPIC_KEY=\"sk-ant-...\"\n"
             )
         return key
+
+
+# ─── Observability CLI ─────────────────────────────────────────────────────
+
+
+@config.command(name="set-observability")
+@click.option("--langsmith-api-key", help="LangSmith API key (for tracing)")
+@click.option("--langsmith-project", default="opencodereview", show_default=True,
+              help="LangSmith project name")
+@click.option("--langfuse-public-key", help="Langfuse public key")
+@click.option("--langfuse-secret-key", help="Langfuse secret key")
+@click.option("--langfuse-host", default="https://cloud.langfuse.com",
+              show_default=True, help="Langfuse host URL")
+def set_observability(
+    langsmith_api_key: Optional[str],
+    langsmith_project: str,
+    langfuse_public_key: Optional[str],
+    langfuse_secret_key: Optional[str],
+    langfuse_host: str,
+) -> None:
+    """Configure observability backends (LangSmith and/or Langfuse).
+
+    Keys are stored in the system keyring.  Both backends can be configured
+    simultaneously with no conflict.  If neither is set, the app runs
+    exactly as before with zero tracing overhead.
+    """
+    if langsmith_api_key:
+        keyring.set_password(SERVICE_NAME, "langsmith_api_key", langsmith_api_key)
+        click.echo(f"LangSmith API key saved (project: {langsmith_project}).")
+
+        # Warn if env var is already set
+        if os.environ.get("LANGCHAIN_API_KEY"):
+            click.echo(
+                "  Note: LANGCHAIN_API_KEY env var is already set — "
+                "it takes precedence over the keyring value.",
+                err=True,
+            )
+    else:
+        click.echo("  LangSmith: skipped (no --langsmith-api-key provided).")
+
+    if langfuse_public_key and langfuse_secret_key:
+        keyring.set_password(SERVICE_NAME, "langfuse_public_key", langfuse_public_key)
+        keyring.set_password(SERVICE_NAME, "langfuse_secret_key", langfuse_secret_key)
+        keyring.set_password(SERVICE_NAME, "langfuse_host", langfuse_host)
+        click.echo(f"Langfuse keys saved (host: {langfuse_host}).")
+
+        if os.environ.get("LANGFUSE_PUBLIC_KEY"):
+            click.echo(
+                "  Note: LANGFUSE_PUBLIC_KEY env var is already set — "
+                "it takes precedence.",
+                err=True,
+            )
+    else:
+        click.echo("  Langfuse: skipped (need both --langfuse-public-key "
+                    "and --langfuse-secret-key).")
 
 
 # ─── Key masking ─────────────────────────────────────────────────────────────

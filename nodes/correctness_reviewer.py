@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 
@@ -13,10 +15,34 @@ logger = logging.getLogger(__name__)
 GROQ_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.0
 
+# Prompt version — tied to the file on disk
+PROMPT_VERSION = "v1"
+PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"correctness_{PROMPT_VERSION}.txt"
+
 # Max characters of context to include in the prompt (soft limit)
 MAX_CONTEXT_CHARS = 6_000
 # Max changed-file content to include per file
 MAX_FILE_CONTENT_CHARS = 4_000
+
+
+# ─── Load prompt from file ──────────────────────────────────────────────────
+
+
+def _load_prompt() -> str:
+    """Load the system prompt from the versioned prompt file."""
+    try:
+        return PROMPT_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("Prompt file %s not found — using fallback", PROMPT_FILE)
+        return (
+            "You are a seasoned code reviewer focused exclusively on correctness. "
+            "Analyse the PR diff and look for logic errors, edge cases, "
+            "off-by-one errors, missing null checks, resource mismanagement, "
+            "and concurrency hazards. Return a list of findings."
+        )
+
+
+SYSTEM_PROMPT = _load_prompt()
 
 
 # ─── Wrapper schema for structured output ───────────────────────────────────
@@ -37,44 +63,7 @@ class CorrectnessReview(BaseModel):
     )
 
 
-# ─── Prompt template ────────────────────────────────────────────────────────
-
-
-SYSTEM_PROMPT = """You are a seasoned code reviewer focused exclusively on **correctness**.
-
-Analyse the PR diff and changed files below.  Look ONLY for:
-
-1. **Logic errors** — incorrect boolean conditions, wrong operators, inverted
-   if/else branches, incorrect variable shadowing, wrong function calls.
-2. **Missed edge cases** — empty collections, None/null values, zero-length
-   inputs, singleton lists, boundary values, negative numbers, overflow.
-3. **Off-by-one errors** — loop bounds, slice indices, fencepost mistakes.
-4. **Missing null/None checks** — unchecked return values, unchecked
-   parameters that can be None, missing `is None` / `is not None` guards.
-5. **Resource / state mismanagement** — unclosed handles, leaked connections,
-   double-close, use-after-free, invalidated iterators.
-6. **Concurrency hazards in the diff** — shared-mutation without locks, race
-   windows, incorrect locking order.
-
-**Do NOT** comment on:
-- Code style, formatting, naming conventions, or readability.
-- Performance (unless it's a correctness issue like an infinite loop).
-- Security (that is handled by a separate reviewer).
-- Tests being absent (unless the diff itself adds broken tests).
-
-For each issue return a `Finding` with:
-- `file_path`: the file the issue is in.
-- `line_start` / `line_end`: the relevant line range (best guess from the diff).
-- `severity`: `critical` (will definitely break), `high` (very likely to break),
-  `medium` (edge-case bug), `low` (minor, unlikely to trigger), or `info`
-  (informational).
-- `category`: always `"correctness"`.
-- `comment`: a concise, specific explanation of the bug.
-- `confidence`: 0.0–1.0 reflecting how sure you are.
-- `suggested_fix`: a concrete code snippet of how to fix it, if applicable.
-
-If you find NO correctness issues, return an empty findings list.
-"""
+# ─── Prompt builder ─────────────────────────────────────────────────────────
 
 
 def _build_prompt(state: OpenCodeReviewState) -> str:
@@ -146,10 +135,11 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
     # --- Build the prompt ----------------------------------------------------
     user_prompt = _build_prompt(state)
     logger.info(
-        "Invoking correctness reviewer (diff=%s, context=%d chunks, prompt=%s)",
+        "Invoking correctness reviewer (diff=%s, context=%d chunks, prompt=%s, prompt_version=%s)",
         _human_size(len(state.diff or "")),
         len(state.context_chunks),
         _human_size(len(user_prompt)),
+        PROMPT_VERSION,
     )
 
     # --- Invoke --------------------------------------------------------------

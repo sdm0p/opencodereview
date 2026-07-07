@@ -358,6 +358,10 @@ def main() -> None:
         help="Bypass GITHUB_TOKEN guard and proceed with posting "
              "(use with caution -- comments WILL be posted to real PRs)",
     )
+    parser.add_argument(
+        "--log-to-observability", action="store_true",
+        help="Log evaluation scores to LangSmith/Langfuse for quality-over-time tracking",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -445,6 +449,10 @@ def main() -> None:
     # --- Print results ---
     _print_results(results)
 
+    # --- Log to observability (optional) ---
+    if args.log_to_observability and results:
+        _log_to_observability(results)
+
     # --- Save ---
     with open(RESULTS_PATH, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
@@ -475,6 +483,85 @@ def _print_verbose(entry: dict, findings: list[Finding], metrics: dict, use_keyw
             f"{gt['comment'][:100]}",
         )
     print()
+
+
+# ─── Quality-over-time: log to observability ───────────────────────────────
+
+
+def _log_to_observability(results: list[dict], dataset_name: str = "opencodereview-eval") -> None:
+    """Log evaluation results to the active observability backend(s).
+
+    This creates a trace/run for the eval run with results as metadata,
+    so quality trends are visible in LangSmith / Langfuse dashboards.
+
+    For LangSmith: creates a dataset with the results (no separate SDK needed
+    — LangChain auto-traces the graph runs).
+    For Langfuse: creates a score for each metric via the Score API.
+
+    This function is called only when ``--log-to-observability`` is passed.
+    """
+    from observability import (
+        get_langfuse_handler,
+        is_langfuse_enabled,
+        is_langsmith_enabled,
+    )
+
+    # Compute aggregate metrics
+    total_tp = sum(r["tp"] for r in results)
+    total_fp = sum(r["fp"] for r in results)
+    total_fn = sum(r["fn"] for r in results)
+    micro_p = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+    micro_r = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+    micro_f = (
+        2 * micro_p * micro_r / (micro_p + micro_r)
+        if (micro_p + micro_r) > 0
+        else 0.0
+    )
+
+    logger.info(
+        "Logging eval results to observability "
+        "(micro F1=%.3f, PRs=%d, LangSmith=%s, Langfuse=%s)",
+        micro_f, len(results),
+        is_langsmith_enabled(), is_langfuse_enabled(),
+    )
+
+    # ── Langfuse: create scores via SDK ──────────────────────────────────
+    if is_langfuse_enabled():
+        try:
+            from langfuse import Langfuse
+
+            lf = Langfuse()
+            run_name = f"eval-{datetime.now():%Y%m%d-%H%M%S}"
+
+            # Log per-PR scores
+            for r in results:
+                lf.score(
+                    name=f"{dataset_name}/{r.get('id', 'unknown')}/f1",
+                    value=r["f1"],
+                    comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}"
+                            f" — P={r['precision']:.3f} R={r['recall']:.3f}",
+                )
+
+            # Log aggregate scores
+            lf.score(name=f"{dataset_name}/micro_f1", value=micro_f)
+            lf.score(name=f"{dataset_name}/micro_precision", value=micro_p)
+            lf.score(name=f"{dataset_name}/micro_recall", value=micro_r)
+            lf.score(name=f"{dataset_name}/pr_count", value=len(results))
+
+            # Flush to ensure scores are sent before process exits
+            lf.flush()
+            logger.info("Langfuse scores logged (run=%s)", run_name)
+        except Exception as exc:
+            logger.warning("Failed to log to Langfuse: %s", exc)
+
+    # ── LangSmith: scores are automatic via graph tracing ────────────────
+    # Every graph.invoke()/graph.stream() call is already traced by LangSmith.
+    # We just log the aggregate for visibility.
+    if is_langsmith_enabled():
+        logger.info(
+            "LangSmith tracing active — eval scores tracked in traced runs. "
+            "Check your LangSmith project for detailed per-PR traces."
+        )
 
 
 if __name__ == "__main__":

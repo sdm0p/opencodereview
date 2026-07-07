@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
@@ -15,6 +16,31 @@ DEFAULT_TEMPERATURE = 0.0
 MAX_CONTEXT_CHARS = 6_000
 MAX_FILE_CONTENT_CHARS = 4_000
 
+# Prompt version — tied to the file on disk
+PROMPT_VERSION = "v1"
+PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"security_{PROMPT_VERSION}.txt"
+
+
+# ─── Load prompt from file ──────────────────────────────────────────────────
+
+
+def _load_prompt() -> str:
+    """Load the system prompt from the versioned prompt file."""
+    try:
+        return PROMPT_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("Prompt file %s not found — using fallback", PROMPT_FILE)
+        return (
+            "You are a security-focused code reviewer. "
+            "Analyse the PR diff for security vulnerabilities: injection, "
+            "secrets, unsafe deserialisation, auth issues, input validation, "
+            "cryptographic misuse, and information disclosure. "
+            "Return a list of findings."
+        )
+
+
+SYSTEM_PROMPT = _load_prompt()
+
 
 # ─── Wrapper schema ──────────────────────────────────────────────────────────
 
@@ -27,44 +53,7 @@ class SecurityReview(BaseModel):
     )
 
 
-# ─── Prompt ─────────────────────────────────────────────────────────────────
-
-
-SYSTEM_PROMPT = """You are a security-focused code reviewer.  Analyse the PR diff and
-changed files for security vulnerabilities ONLY.  Look for:
-
-1. **Injection** — SQL, NoSQL, command, template (SSTI), LDAP, XSS, path
-   traversal via unsanitized user input.
-2. **Secrets / credentials** — hardcoded API keys, tokens, passwords, or
-   connection strings that should use environment variables or a secret store.
-3. **Unsafe deserialization** — `pickle.loads`, `yaml.load(…)` without
-   SafeLoader, `eval`, `exec`, or `marshal` on untrusted data.
-4. **Authentication / authorisation** — missing or broken access control
-   checks, privilege escalation paths, session fixation, weak password hashing.
-5. **Input validation** — missing or insufficient validation of user-supplied
-   data that could lead to buffer overflows, integer overflows, or format-string
-   bugs.
-6. **Cryptographic misuse** — weak algorithms (MD5, SHA1 for signatures),
-   hardcoded IVs/nonces, ECB mode, insufficient key lengths, missing TLS.
-7. **Information disclosure** — stack traces leaked to users, verbose error
-   messages exposing internals, debug endpoints left enabled.
-
-**Do NOT** comment on:
-- Code style, formatting, naming conventions.
-- Performance (unless it creates a denial-of-service vector).
-- General logic errors or edge cases (handled by correctness reviewer).
-
-For each issue return a `Finding` with:
-- `file_path`, `line_start`, `line_end`: location in the diff.
-- `severity`: `critical` (remotely exploitable), `high` (privilege escalation),
-  `medium` (information disclosure), `low` (defence in depth), or `info`.
-- `category`: always `"security"`.
-- `comment`: concise, actionable explanation.
-- `confidence`: 0.0–1.0.
-- `suggested_fix`: concrete code snippet if applicable.
-
-Return an empty findings list if no security issues are found.
-"""
+# ─── Prompt builder ─────────────────────────────────────────────────────────
 
 
 def _build_prompt(state: OpenCodeReviewState) -> str:
@@ -118,9 +107,10 @@ def security_reviewer_node(state: OpenCodeReviewState) -> dict:
 
     user_prompt = _build_prompt(state)
     logger.info(
-        "Invoking security reviewer (diff=%s, context=%d chunks)",
+        "Invoking security reviewer (diff=%s, context=%d chunks, prompt_version=%s)",
         _human_size(len(state.diff or "")),
         len(state.context_chunks),
+        PROMPT_VERSION,
     )
 
     try:
