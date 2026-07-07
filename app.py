@@ -68,7 +68,7 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
 def _format_findings_table(findings: list) -> str:
     """Build an HTML table of findings with severity-coloured badges."""
     if not findings:
-        return '<p style="color:#666">No issues found.</p>'
+        return '<p style="color:var(--text-muted)">No issues found.</p>'
 
     rows: list[str] = []
     for f in findings:
@@ -90,15 +90,15 @@ def _format_findings_table(findings: list) -> str:
         '<div style="overflow-x:auto">'
         '<table style="width:100%;border-collapse:collapse;font-size:0.9em">'
         "<thead>"
-        '<tr style="background:#f3f4f6;border-bottom:2px solid #e5e7eb">'
-        '<th style="padding:10px 12px;text-align:left">Severity</th>'
-        '<th style="padding:10px 12px;text-align:left">Category</th>'
-        '<th style="padding:10px 12px;text-align:left">Location</th>'
-        '<th style="padding:10px 12px;text-align:left">Comment</th>'
-        '<th style="padding:10px 12px;text-align:left">Confidence</th>'
+        f'<tr style="background:var(--bg-table-header);border-bottom:2px solid var(--border-color)">'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Severity</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Category</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Location</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Comment</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Confidence</th>'
         "</tr>"
         "</thead>"
-        "<tbody>" + "".join(rows) + "</tbody>"
+        f'<tbody style="color:var(--text-secondary)">' + "".join(rows) + "</tbody>"
         "</table>"
         "</div>"
     )
@@ -107,7 +107,7 @@ def _format_findings_table(findings: list) -> str:
 def _format_verdict(verdict: Verdict | None) -> str:
     """Build a verdict summary card."""
     if verdict is None:
-        return '<p style="color:#666">No verdict produced.</p>'
+        return '<p style="color:var(--text-muted)">No verdict produced.</p>'
 
     icon = RECOMMENDATION_ICONS.get(verdict.recommendation, "📋")
     color = (
@@ -117,16 +117,17 @@ def _format_verdict(verdict: Verdict | None) -> str:
     )
 
     return (
-        f'<div style="border:1px solid #e5e7eb;border-radius:12px;'
-        f'padding:16px 20px;background:#f9fafb">'
+        f'<div style="border:1px solid var(--border-color);border-radius:12px;'
+        f'padding:16px 20px;background:var(--bg-card)">'
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">'
         f'<span style="font-size:2em">{icon}</span>'
         f'<span style="font-size:1.4em;font-weight:700;color:{color}">'
         f"{verdict.recommendation.upper()}</span>"
-        f'<span style="margin-left:auto;font-size:1.2em;font-weight:600">'
+        f'<span style="margin-left:auto;font-size:1.2em;font-weight:600;'
+        f'color:var(--text-primary)">'
         f"Score: {verdict.overall_score}/10</span>"
         f"</div>"
-        f"<p style='margin:0;color:#4b5563'>{verdict.summary}</p>"
+        f"<p style='margin:0;color:var(--text-secondary)'>{verdict.summary}</p>"
         f"</div>"
     )
 
@@ -145,7 +146,7 @@ def _format_findings_count(findings: list) -> str:
                 f'<span style="color:{color};font-weight:600">'
                 f"{sev}: {counts[sev]}</span>"
             )
-    return "  |  ".join(parts) if parts else "No issues"
+    return "  |  ".join(parts) if parts else '<span style="color:var(--text-muted)">No issues</span>'
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -272,33 +273,124 @@ def run_smoke(progress=gr.Progress()):
 # ─── UI ──────────────────────────────────────────────────────────────────────
 
 CSS = """
+/* ── CSS Custom Properties (light mode) ───────────────────────────── */
+:root {
+    --bg-card: #f9fafb;
+    --bg-table-header: #f3f4f6;
+    --border-color: #e5e7eb;
+    --text-primary: #111827;
+    --text-secondary: #4b5563;
+    --text-muted: #6b7280;
+    --text-footer: #9ca3af;
+    --spinner-track: #e5e7eb;
+}
+
+/* ── Dark Mode Overrides ─────────────────────────────────────────── */
+body.dark-mode {
+    --bg-card: #1f2937;
+    --bg-table-header: #374151;
+    --border-color: #4b5563;
+    --text-primary: #f3f4f6;
+    --text-secondary: #d1d5db;
+    --text-muted: #9ca3af;
+    --text-footer: #6b7280;
+    --spinner-track: #4b5563;
+}
+body.dark-mode .gradio-container {
+    background-color: #111827 !important;
+}
+body.dark-mode .gr-box,
+body.dark-mode .tabs,
+body.dark-mode .tab-nav {
+    background-color: #1f2937 !important;
+    border-color: #4b5563 !important;
+}
+body.dark-mode input, body.dark-mode textarea {
+    background-color: #374151 !important;
+    color: #f3f4f6 !important;
+    border-color: #4b5563 !important;
+}
+body.dark-mode label {
+    color: #d1d5db !important;
+}
+body.dark-mode button:not(.lg) {
+    color: #f3f4f6 !important;
+}
+body.dark-mode .footer {
+    color: var(--text-footer) !important;
+}
+body.dark-mode details summary {
+    color: #d1d5db !important;
+}
+body.dark-mode [data-testid="block-info"] {
+    color: #d1d5db !important;
+}
+
+/* ── Global Styles ────────────────────────────────────────────────── */
 .gr-container { max-width: 960px; margin: 0 auto; }
 h1 { display: flex; align-items: center; gap: 10px; }
-.footer { text-align: center; color: #9ca3af; font-size: 0.85em; padding: 20px 0; }
+.footer { text-align: center; color: var(--text-footer); font-size: 0.85em; padding: 20px 0; }
 details { margin-top: 8px; }
 details summary { cursor: pointer; color: #4b5563; font-weight: 500; }
 
-/* Loading spinner */
+/* ── Theme toggle ─────────────────────────────────────────────────── */
+.theme-toggle-wrap {
+    display: flex; align-items: center; gap: 8px; margin-left: auto;
+}
+.theme-toggle-btn {
+    background: none; border: 1px solid #d1d5db; border-radius: 8px;
+    padding: 6px 12px; cursor: pointer; font-size: 1.1em;
+    transition: all 0.2s ease;
+}
+.theme-toggle-btn:hover {
+    background: #f3f4f6; border-color: #9ca3af;
+}
+body.dark-mode .theme-toggle-btn {
+    border-color: #4b5563; color: #f3f4f6;
+}
+body.dark-mode .theme-toggle-btn:hover {
+    background: #374151;
+}
+
+/* ── Loading spinner ──────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-spinner {
     display: flex; align-items: center; gap: 12px;
     padding: 24px 0; justify-content: center;
 }
 .loading-spinner .spinner {
-    width: 24px; height: 24px; border: 3px solid #e5e7eb;
+    width: 24px; height: 24px; border: 3px solid var(--spinner-track);
     border-top-color: #6366f1; border-radius: 50%;
     animation: spin 0.8s linear infinite;
 }
 .loading-spinner .label {
-    color: #6b7280; font-size: 0.95em;
+    color: var(--text-muted); font-size: 0.95em;
 }
 """
 
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     gr.HTML(
-        '<h1>🔍 OpenCodeReview</h1>'
-        '<p style="color:#6b7280;margin-top:-8px">'
-        "AI-powered PR review with human-in-the-loop approval</p>"
+        '<div style="display:flex;align-items:center">'
+        '<div><h1>🔍 OpenCodeReview</h1>'
+        '<p style="color:var(--text-muted);margin-top:-8px">'
+        'AI-powered PR review with human-in-the-loop approval</p></div>'
+        '<div class="theme-toggle-wrap">'
+        '<button class="theme-toggle-btn" onclick="toggleTheme()"'
+        ' title="Toggle dark mode" id="themeToggleBtn">🌙</button></div>'
+        '</div>'
+        '<script>'
+        '(function(){'
+        '  const isDark = localStorage.getItem("ocr-theme") === "dark";'
+        '  if (isDark) document.body.classList.add("dark-mode");'
+        '  const btn = document.getElementById("themeToggleBtn");'
+        '  if (btn) btn.textContent = isDark ? "☀️" : "🌙";'
+        '})();'
+        'function toggleTheme(){'
+        '  const isDark = document.body.classList.toggle("dark-mode");'
+        '  localStorage.setItem("ocr-theme", isDark ? "dark" : "light");'
+        '  document.getElementById("themeToggleBtn").textContent = isDark ? "☀️" : "🌙";'
+        '}'
+        '</script>'
     )
 
     # ── State ────────────────────────────────────────────────────────────
@@ -515,7 +607,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     gr.HTML(
         f'<p class="footer">'
         f'Built with LangGraph · Groq · ChromaDB · Gradio'
-        f'<br><span style="opacity:0.5;font-size:0.85em">'
+        f'<br><span style="opacity:0.5;font-size:0.85em;color:var(--text-footer)">'
         f'deploy: <code>{_commit}</code> · {_ts}'
         f'</span></p>'
     )
