@@ -277,6 +277,21 @@ h1 { display: flex; align-items: center; gap: 10px; }
 .footer { text-align: center; color: #9ca3af; font-size: 0.85em; padding: 20px 0; }
 details { margin-top: 8px; }
 details summary { cursor: pointer; color: #4b5563; font-weight: 500; }
+
+/* Loading spinner */
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-spinner {
+    display: flex; align-items: center; gap: 12px;
+    padding: 24px 0; justify-content: center;
+}
+.loading-spinner .spinner {
+    width: 24px; height: 24px; border: 3px solid #e5e7eb;
+    border-top-color: #6366f1; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+.loading-spinner .label {
+    color: #6b7280; font-size: 0.95em;
+}
 """
 
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
@@ -305,8 +320,16 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                 precision=0,
                 scale=1,
             )
-        run_btn = gr.Button("▶ Run Review", variant="primary", size="lg")
 
+        with gr.Row():
+            run_btn = gr.Button("▶ Run Review", variant="primary", size="lg", scale=2)
+            cancel_btn = gr.Button("⏹ Cancel", variant="stop", size="lg", visible=False)
+
+        loading_box = gr.HTML(
+            '<div class="loading-spinner"><div class="spinner"></div>'
+            '<span class="label">Running review pipeline...</span></div>',
+            visible=False,
+        )
         status_msg = gr.Markdown(visible=False)
 
         with gr.Column(visible=False) as results_panel:
@@ -323,21 +346,37 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
         # ── Event wiring ──────────────────────────────────────────────
         def on_run_click(*args):
             """Generator that clears old state, runs review, shows results."""
+            # Yield initial loading state
+            yield [
+                gr.update(visible=True),
+                gr.update(visible=True, variant="stop"),
+                gr.update(visible=False),
+                gr.update(visible=False, value=""),
+                *[None, None, None, None],
+                gr.update(visible=False),
+            ]
+
             for result, err in run_review(*args):
                 if err:
                     yield [
-                        *[None, None, None, None],
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
                         gr.update(visible=True, value=err),
+                        *[None, None, None, None],
                         gr.update(visible=False),
                     ]
                 else:
                     verdict_html, findings_html, count_html, config_json = result
                     yield [
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
+                        gr.update(visible=False),
                         gr.update(value=verdict_html),
                         gr.update(value=count_html),
                         gr.update(value=findings_html),
                         config_json,
-                        gr.update(visible=False),
                         gr.update(visible=True),
                     ]
 
@@ -345,14 +384,18 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
             fn=on_run_click,
             inputs=[repo_input, pr_input],
             outputs=[
+                loading_box,
+                cancel_btn,
+                run_btn,
+                status_msg,
                 verdict_display,
                 count_display,
                 findings_display,
                 pr_state,
-                status_msg,
                 results_panel,
             ],
         )
+        cancel_btn.click(fn=None, cancels=[run_event])
 
         def on_approve(config_json):
             msg = resume_review(config_json, "approve")
@@ -379,7 +422,15 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
             "Run the review pipeline on **synthetic demo data** "
             "(no API keys needed, no interrupt required)."
         )
-        smoke_btn = gr.Button("▶ Run Smoke Test", variant="primary", size="lg")
+        with gr.Row():
+            smoke_btn = gr.Button("▶ Run Smoke Test", variant="primary", size="lg", scale=2)
+            smoke_cancel_btn = gr.Button("⏹ Cancel", variant="stop", size="lg", visible=False)
+
+        smoke_loading = gr.HTML(
+            '<div class="loading-spinner"><div class="spinner"></div>'
+            '<span class="label">Running smoke test...</span></div>',
+            visible=False,
+        )
 
         with gr.Column(visible=False) as smoke_results:
             smoke_verdict = gr.HTML()
@@ -389,31 +440,51 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                 smoke_reject = gr.Button("❌ Reject (demo)", variant="secondary")
             smoke_resume_msg = gr.Markdown()
 
+        smoke_status = gr.Markdown(visible=False)
+
         def on_smoke_click():
+            # Show loading state
+            yield [
+                gr.update(visible=True),
+                gr.update(visible=True, variant="stop"),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                None,
+                gr.update(value=""),
+                gr.update(value=""),
+                gr.update(visible=False),
+            ]
             for result, err in run_smoke():
                 if err:
                     yield [
-                        gr.update(visible=True, value=err),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
                         gr.update(visible=False),
                         None,
                         gr.update(value=""),
                         gr.update(value=""),
+                        gr.update(visible=True, value=err),
                     ]
                 else:
                     verdict_html, findings_html, config_json, s_verdict, s_findings = result
                     yield [
                         gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
                         gr.update(visible=True),
                         config_json,
                         gr.update(value=s_verdict),
                         gr.update(value=s_findings),
+                        gr.update(visible=False),
                     ]
 
-        smoke_btn.click(
+        smoke_event = smoke_btn.click(
             fn=on_smoke_click,
-            outputs=[status_msg, smoke_results, smoke_state,
-                     smoke_verdict, smoke_findings],
+            outputs=[smoke_loading, smoke_cancel_btn, smoke_btn, smoke_results, smoke_state,
+                     smoke_verdict, smoke_findings, smoke_status],
         )
+        smoke_cancel_btn.click(fn=None, cancels=[smoke_event])
 
         smoke_approve.click(
             fn=lambda c: resume_review(c, "approve"),
