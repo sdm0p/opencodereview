@@ -23,6 +23,9 @@ from graph import build_graph
 from main import _cleanup_db, SYNTHETIC_STATE
 from state import Verdict
 
+import subprocess
+from datetime import datetime, timezone
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -143,6 +146,25 @@ def _format_findings_count(findings: list) -> str:
                 f"{sev}: {counts[sev]}</span>"
             )
     return "  |  ".join(parts) if parts else "No issues"
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _get_deploy_info() -> tuple[str, str]:
+    """Return Git commit hash and deploy timestamp for the footer."""
+    commit = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+    except Exception:
+        pass
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return commit, ts
 
 
 # ─── Gradio callbacks ───────────────────────────────────────────────────────
@@ -418,8 +440,13 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
         )
 
     # ── Footer ─────────────────────────────────────────────────────────
+    _commit, _ts = _get_deploy_info()
     gr.HTML(
-        '<p class="footer">Built with LangGraph · Groq · ChromaDB · Gradio</p>'
+        f'<p class="footer">'
+        f'Built with LangGraph · Groq · ChromaDB · Gradio'
+        f'<br><span style="opacity:0.5;font-size:0.85em">'
+        f'deploy: <code>{_commit}</code> · {_ts}'
+        f'</span></p>'
     )
 
 
