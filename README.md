@@ -27,3 +27,4 @@ AI-powered PR review with human-in-the-loop approval.
 | `GITHUB_TOKEN` | No | GitHub token for fetching PRs and posting comments |
 
 Built with LangGraph · Groq · ChromaDB · Gradio
+
