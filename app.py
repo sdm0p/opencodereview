@@ -334,12 +334,9 @@ details { margin-top: 8px; }
 details summary { cursor: pointer; color: #4b5563; font-weight: 500; }
 
 /* ── Theme toggle ─────────────────────────────────────────────────── */
-.theme-toggle-row {
-    justify-content: flex-end !important;
-    margin-top: -40px !important;
-    margin-bottom: 8px !important;
-}
 #theme-toggle-btn {
+    float: right;
+    margin-top: 24px !important;
     background: transparent !important;
     border: 1px solid #d1d5db !important;
     border-radius: 8px !important;
@@ -399,17 +396,16 @@ JS_TOGGLE_THEME = """
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     demo.load(js=JS_RESTORE_THEME)
 
-    gr.HTML(
-        '<div style="display:flex;align-items:center">'
-        '<div><h1>🔍 OpenCodeReview</h1>'
-        '<p style="color:var(--text-muted);margin-top:-8px">'
-        'AI-powered PR review with human-in-the-loop approval</p></div>'
-        '</div>'
-    )
-
-    with gr.Row(elem_classes="theme-toggle-row"):
-        theme_toggle = gr.Button("🌙", elem_id="theme-toggle-btn", size="sm", min_width=50)
-        theme_toggle.click(js=JS_TOGGLE_THEME)
+    with gr.Row():
+        with gr.Column(scale=4):
+            gr.HTML(
+                '<h1>🔍 OpenCodeReview</h1>'
+                '<p style="color:var(--text-muted);margin-top:-8px">'
+                'AI-powered PR review with human-in-the-loop approval</p>'
+            )
+        with gr.Column(scale=1, min_width=60):
+            theme_toggle = gr.Button("🌙", elem_id="theme-toggle-btn", size="sm", min_width=50, visible=True)
+            theme_toggle.click(js=JS_TOGGLE_THEME)
 
     # ── State ────────────────────────────────────────────────────────────
     pr_state = gr.State()
