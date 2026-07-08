@@ -11,11 +11,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Push to Hugging Face Space
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface-hub
+        run: pip install huggingface-hub
+
+      - name: Upload to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote remove hf 2>/dev/null || true
-          git remote add hf https://sdm0:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/Sdm0/opencodereview
-          git push hf main --force
+          python -c "
+import os
+from pathlib import Path
+from huggingface_hub import HfApi, logging as hf_logging
+
+hf_logging.set_verbosity_info()
+api = HfApi(token=os.environ['HF_TOKEN'])
+repo_id = 'Sdm0/opencodereview'
+
+# Files/dirs to exclude (matches .gitignore)
+ignore = [
+    '*.db', '*.db-wal', '*.db-shm',
+    '**/__pycache__', '**/*.pyc',
+    '.env', '.venv',
+    '.git', '.gitignore', '.github',
+    '*.md',
+]
+
+print(f'Uploading to {repo_id} ...')
+api.upload_folder(
+    repo_id=repo_id,
+    repo_type='space',
+    folder_path=str(Path.cwd()),
+    path_in_repo='.',
+    ignore_patterns=ignore,
+    delete_patterns='*',
+    commit_message=f'Deploy {os.environ.get(\"GITHUB_SHA\", \"?\")[:8]}',
+)
+print('Upload complete!')
+
+# Explicitly restart to ensure the Space rebuilds
+print('Restarting Space...')
+api.restart_space(repo_id)
+print('Restart triggered!')
+"
