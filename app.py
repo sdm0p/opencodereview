@@ -475,12 +475,7 @@ JS_TOGGLE_THEME = """
 # ── Initialise observability backends ────────────────────────────────
 _init_observability_ui()
 
-# Gradio 6.0+ moved css/theme params from Blocks() to launch().
-# Keep them as module-level vars for launch(); don't pass to Blocks().
-_css = CSS
-_theme = gr.themes.Soft()
-
-with gr.Blocks(title="OpenCodeReview") as demo:
+with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     demo.load(js=JS_RESTORE_THEME)
 
     with gr.Row():
@@ -723,8 +718,6 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=port,
         share=False,
-        css=_css,
-        theme=_theme,
     )
 
 
