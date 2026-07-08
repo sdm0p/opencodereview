@@ -43,7 +43,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Optional dependencies (chromadb for vector store, langchain-groq for LLM)
 RUN pip install --no-cache-dir \
     chromadb \
-    langchain-groq
+    langchain-groq \
+    langfuse \
+    langchain-google-genai
 
 # -- Stage 2: Runtime (default) -----------------------------------------------
 FROM python:3.12-slim AS runtime
