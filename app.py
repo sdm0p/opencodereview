@@ -695,11 +695,13 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     with gr.Accordion("🔑 Configured Keys & Health", open=False):
         h = HealthStatus()
         health_data = h.summary()
+        gemini_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
         groq_ok = bool(os.environ.get("GROQ_API_KEY", "").strip())
         gh_ok = bool(os.environ.get("GITHUB_TOKEN", "").strip())
         ls_ok = h.langsmith
         lf_ok = h.langfuse
         lines = [
+            f"<li>GEMINI_API_KEY: {'✅ Set' if gemini_ok else '❌ Not set'}</li>",
             f"<li>GROQ_API_KEY: {'✅ Set' if groq_ok else '❌ Not set'}</li>",
             f"<li>GITHUB_TOKEN: {'✅ Set' if gh_ok else '❌ Not set'}</li>",
             f"<li>LangSmith: {health_data['LangSmith']}</li>",
