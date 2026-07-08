@@ -322,6 +322,7 @@ def run_smoke(progress=gr.Progress()):
         list(graph.stream(SYNTHETIC_STATE, config))
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "smoke_stream"})
+        logger.exception("Smoke test failed: %s", exc)
         raise
     state = graph.get_state(config)
     tasks = state.tasks
@@ -474,7 +475,12 @@ JS_TOGGLE_THEME = """
 # ── Initialise observability backends ────────────────────────────────
 _init_observability_ui()
 
-with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
+# Gradio 6.0+ moved css/theme params from Blocks() to launch().
+# Keep them as module-level vars for launch(); don't pass to Blocks().
+_css = CSS
+_theme = gr.themes.Soft()
+
+with gr.Blocks(title="OpenCodeReview") as demo:
     demo.load(js=JS_RESTORE_THEME)
 
     with gr.Row():
@@ -717,6 +723,8 @@ def main() -> None:
         server_name="0.0.0.0",
         server_port=port,
         share=False,
+        css=_css,
+        theme=_theme,
     )
 
 
