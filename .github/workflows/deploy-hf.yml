@@ -33,23 +33,19 @@ jobs:
           api = HfApi(token=os.environ['HF_TOKEN'])
           repo_id = 'Sdm0/opencodereview'
 
-          # Files/dirs to exclude (matches .gitignore)
-          ignore = [
-              '*.db', '*.db-wal', '*.db-shm',
-              '**/__pycache__', '**/*.pyc',
-              '.env', '.venv',
-              '.git', '.gitignore', '.github',
-              '*.md',
-          ]
-
           print(f'Uploading to {repo_id} ...')
           api.upload_folder(
               repo_id=repo_id,
               repo_type='space',
               folder_path=str(Path.cwd()),
               path_in_repo='.',
-              ignore_patterns=ignore,
-              delete_patterns='*',
+              ignore_patterns=[
+                  '*.db', '*.db-wal', '*.db-shm',
+                  '**/__pycache__', '**/*.pyc',
+                  '.env', '.venv',
+                  '.git', '.gitignore', '.github',
+                  '*.md',
+              ],
               commit_message=f'Deploy {os.environ.get(\"GITHUB_SHA\", \"?\")[:8]}',
           )
           print('Upload complete!')
