@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from langchain_groq import ChatGroq
+from llm_factory import create_llm
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState
@@ -93,16 +93,15 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
 
 
 def security_reviewer_node(state: OpenCodeReviewState) -> dict:
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not api_key:
-        logger.warning("GROQ_API_KEY not set — skipping security review")
-        return {}
-
     if not state.diff:
         logger.info("No diff to review — skipping security review")
         return {}
 
-    llm = ChatGroq(model=GROQ_MODEL, temperature=DEFAULT_TEMPERATURE, api_key=api_key)
+    try:
+        llm = create_llm()
+    except ValueError:
+        logger.warning("No LLM key set — skipping security review")
+        return {}
     structured_llm = llm.with_structured_output(SecurityReview)
 
     user_prompt = _build_prompt(state)

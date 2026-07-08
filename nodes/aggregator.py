@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from langchain_groq import ChatGroq
+from llm_factory import create_llm
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState, Severity, Verdict
@@ -231,19 +231,17 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
     )
 
     # -- Phase 2: LLM critic or rule-based fallback --------------------------
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    try:
+        llm = create_llm()
+    except ValueError:
+        llm = None
 
-    if api_key:
+    if llm is not None:
         logger.info(
             "Invoking aggregator LLM critic (prompt_version=%s) …",
             PROMPT_VERSION,
         )
         try:
-            llm = ChatGroq(
-                model=GROQ_MODEL,
-                temperature=DEFAULT_TEMPERATURE,
-                api_key=api_key,
-            )
             structured_llm = llm.with_structured_output(AggregatedReview)
 
             messages = [
@@ -267,7 +265,7 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
             final_findings = deduped
             verdict = _rule_verdict(deduped)
     else:
-        logger.info("GROQ_API_KEY not set — using rule-based aggregation")
+        logger.info("No LLM key set — using rule-based aggregation")
         final_findings = deduped
         verdict = _rule_verdict(deduped)
 

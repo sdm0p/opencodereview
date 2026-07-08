@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from langchain_groq import ChatGroq
+from llm_factory import create_llm
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState, Severity
@@ -115,21 +115,16 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
     reducer).
     """
     # --- Sanity checks -------------------------------------------------------
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not api_key:
-        logger.warning("GROQ_API_KEY not set — skipping correctness review")
-        return {}
-
     if not state.diff:
         logger.info("No diff to review — skipping correctness review")
         return {}
 
-    # --- Build the LLM -------------------------------------------------------
-    llm = ChatGroq(
-        model=GROQ_MODEL,
-        temperature=DEFAULT_TEMPERATURE,
-        api_key=api_key,
-    )
+    # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
+    try:
+        llm = create_llm()
+    except ValueError:
+        logger.warning("No LLM key set — skipping correctness review")
+        return {}
     structured_llm = llm.with_structured_output(CorrectnessReview)
 
     # --- Build the prompt ----------------------------------------------------
