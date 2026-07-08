@@ -340,6 +340,12 @@ class TokenCostCallback:
     def total_cost(self) -> float:
         return sum(u.get("cost", 0.0) for u in self.usage)
 
+    def on_chain_start(self, *args, **kwargs) -> None:
+        pass
+
+    def on_chain_end(self, *args, **kwargs) -> None:
+        pass
+
     def on_llm_end(self, response, **kwargs) -> None:
         """LangChain callback — called after each LLM invocation.
 
