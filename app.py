@@ -473,7 +473,13 @@ JS_TOGGLE_THEME = """
 """
 
 # ── Initialise observability backends ────────────────────────────────
-_init_observability_ui()
+# Wrap in try/except so a failure here doesn't prevent the UI from loading.
+# This is important on Hugging Face Spaces where dependencies may have
+# version incompatibilities.
+try:
+    _init_observability_ui()
+except Exception as exc:
+    logger.warning("Observability initialisation failed (non-fatal): %s", exc)
 
 with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
     demo.load(js=JS_RESTORE_THEME)

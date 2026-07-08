@@ -32,8 +32,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from langchain_core.callbacks import BaseCallbackHandler
-
 logger = logging.getLogger(__name__)
 
 # ─── LangSmith (automatic, env-var-driven) ──────────────────────────────────
@@ -301,12 +299,13 @@ def check_langfuse_connectivity() -> tuple[bool, str]:
 # ─── Token cost callback (accumulates LLM usage across a run) ────────────
 
 
-class TokenCostCallback(BaseCallbackHandler):
+class TokenCostCallback:
     """Accumulates per-model token usage from LangChain LLM calls.
 
-    Inherits from ``BaseCallbackHandler`` so LangChain's dispatch mechanism
-    correctly recognises it as a proper callback handler.  Only
-    ``on_llm_end`` is overridden; all other lifecycle events are ignored.
+    Lazily imports ``BaseCallbackHandler`` so that ``observability.py`` can
+    be imported even when ``langchain-core`` has version incompatibilities
+    (e.g. on Hugging Face Spaces).  Only ``on_llm_end`` is overridden;
+    all other lifecycle events are ignored.
 
     Usage
     -----
@@ -316,8 +315,17 @@ class TokenCostCallback(BaseCallbackHandler):
         print(counter.summary())
     """
 
+    raise_error: bool = False
+    ignore_llm: bool = False
+    ignore_chain: bool = False
+    ignore_agent: bool = False
+    ignore_retriever: bool = False
+    ignore_chat_model: bool = False
+    ignore_custom_event: bool = False
+    ignore_retry: bool = False
+    run_inline: bool = False
+
     def __init__(self) -> None:
-        super().__init__()
         self.usage: list[dict[str, Any]] = []
 
     @property
