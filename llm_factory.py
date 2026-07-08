@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.1-flash"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.0
 
