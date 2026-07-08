@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 
-  workflow_dispatch:  # Allow manual trigger too
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -12,11 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Sync to Hugging Face Spaces
-        uses: huggingface/hub-sync@v0.1.0
-        with:
-          github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: Sdm0/opencodereview
-          hf_token: ${{ secrets.HF_TOKEN }}
+      - name: Push to Hugging Face Space
+        run: |
+          git remote remove hf 2>/dev/null || true
+          git remote add hf https://sdm0:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/Sdm0/opencodereview
+          git push hf main --force
