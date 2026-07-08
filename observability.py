@@ -92,10 +92,12 @@ def get_langfuse_handler():
             host=host,
         )
     except ImportError:
-        logger.warning("langfuse package not installed — skipping tracing")
+        logger.warning("langfuse not available — skipping tracing")
+        logger.debug("ImportError details", exc_info=True)
         return None
     except Exception as exc:
         logger.warning("Failed to initialise Langfuse handler: %s", exc)
+        logger.debug("Exception details", exc_info=True)
         return None
 
 
