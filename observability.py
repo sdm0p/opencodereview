@@ -32,6 +32,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from langchain_core.callbacks import BaseCallbackHandler
+
 logger = logging.getLogger(__name__)
 
 # ─── LangSmith (automatic, env-var-driven) ──────────────────────────────────
@@ -299,8 +301,12 @@ def check_langfuse_connectivity() -> tuple[bool, str]:
 # ─── Token cost callback (accumulates LLM usage across a run) ────────────
 
 
-class TokenCostCallback:
+class TokenCostCallback(BaseCallbackHandler):
     """Accumulates per-model token usage from LangChain LLM calls.
+
+    Inherits from ``BaseCallbackHandler`` so LangChain's dispatch mechanism
+    correctly recognises it as a proper callback handler.  Only
+    ``on_llm_end`` is overridden; all other lifecycle events are ignored.
 
     Usage
     -----
@@ -311,6 +317,7 @@ class TokenCostCallback:
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self.usage: list[dict[str, Any]] = []
 
     @property
@@ -325,8 +332,12 @@ class TokenCostCallback:
     def total_cost(self) -> float:
         return sum(u.get("cost", 0.0) for u in self.usage)
 
-    def on_llm_end(self, response) -> None:
-        """LangChain callback — called after each LLM invocation."""
+    def on_llm_end(self, response, **kwargs) -> None:
+        """LangChain callback — called after each LLM invocation.
+
+        ``**kwargs`` absorbs ``run_id``, ``parent_run_id``, and other
+        metadata that LangChain passes to callback handlers.
+        """
         try:
             usage = response.llm_output or {}
             token_usage = usage.get("token_usage", {}) or {}
