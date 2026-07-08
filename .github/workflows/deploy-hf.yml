@@ -44,7 +44,6 @@ jobs:
                   '**/__pycache__', '**/*.pyc',
                   '.env', '.venv',
                   '.git', '.gitignore', '.github',
-                  '*.md',
               ],
               commit_message=f'Deploy {os.environ.get(\"GITHUB_SHA\", \"?\")[:8]}',
           )
