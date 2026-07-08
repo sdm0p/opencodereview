@@ -18,5 +18,5 @@ jobs:
         uses: huggingface/hub-sync@v0.1.0
         with:
           github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: sdm0/opencodereview
+          huggingface_repo_id: Sdm0/opencodereview
           hf_token: ${{ secrets.HF_TOKEN }}
