@@ -72,24 +72,24 @@ def get_langfuse_handler():
     """Return a Langfuse ``CallbackHandler`` if keys are configured, else None.
 
     Reads ``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, and optionally
-    ``LANGFUSE_HOST`` from environment variables.
+    ``LANGFUSE_HOST`` from environment variables.  In langfuse v4+ the
+    ``CallbackHandler`` only needs ``public_key``; the SDK reads
+    ``LANGFUSE_SECRET_KEY`` and ``LANGFUSE_HOST`` from the environment
+    automatically.
     """
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
-    host = os.environ.get(
-        "LANGFUSE_HOST", "https://cloud.langfuse.com"
-    ).strip()
 
     if not public_key or not secret_key:
         return None
 
     try:
-        from langfuse.callback import CallbackHandler
+        from langfuse.langchain import CallbackHandler
 
+        # In langfuse v4+, CallbackHandler only needs public_key;
+        # the secret key is read automatically from LANGFUSE_SECRET_KEY env var
         return CallbackHandler(
             public_key=public_key,
-            secret_key=secret_key,
-            host=host,
         )
     except ImportError:
         logger.warning(
