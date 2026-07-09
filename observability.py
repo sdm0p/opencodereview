@@ -84,13 +84,17 @@ def get_langfuse_handler():
         return None
 
     try:
+        from langfuse import Langfuse
         from langfuse.langchain import CallbackHandler
 
-        # In langfuse v4+, CallbackHandler only needs public_key;
-        # the secret key is read automatically from LANGFUSE_SECRET_KEY env var
-        return CallbackHandler(
-            public_key=public_key,
-        )
+        # In langfuse v4+, the CallbackHandler uses get_client() to look up
+        # an existing Langfuse client instance by public_key.  We must
+        # initialise the client first so that get_client() finds it;
+        # otherwise the handler receives a disabled client that drops traces.
+        # Both classes read LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from
+        # environment variables automatically.
+        Langfuse()
+        return CallbackHandler()
     except ImportError:
         logger.warning(
             "langfuse not available — skipping tracing",
