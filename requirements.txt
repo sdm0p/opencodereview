@@ -9,4 +9,5 @@ gradio>=4.0
 langchain-groq
 langchain
 chromadb
+langsmith>=0.7
 langfuse
