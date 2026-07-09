@@ -62,6 +62,9 @@ def enable_langsmith(api_key: str, project: str = "") -> None:
     """
     # Modern env vars (required by langsmith-sdk >= 0.7)
     os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_ENDPOINT"] = os.environ.get(
+        "LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"
+    )
     os.environ["LANGSMITH_API_KEY"] = api_key
     # Legacy env vars (backward compat with older LangChain)
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
@@ -79,6 +82,7 @@ def disable_langsmith() -> None:
     """Remove LangSmith env vars so tracing stops."""
     # Modern vars
     os.environ.pop("LANGSMITH_TRACING", None)
+    os.environ.pop("LANGSMITH_ENDPOINT", None)
     os.environ.pop("LANGSMITH_API_KEY", None)
     # Legacy vars
     os.environ.pop("LANGCHAIN_TRACING_V2", None)
