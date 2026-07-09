@@ -3,7 +3,7 @@
 Priority
 --------
 1. **Google Gemini** (primary) — uses ``GEMINI_API_KEY`` env var.
-   Model: ``gemini-2.0-flash`` — generous free tier (~1 500 req/day).
+   Model: ``gemini-3.1-flash-lite`` — generous free tier.
 2. **Groq** (fallback) — uses ``GROQ_API_KEY`` env var.
    Model: ``llama-3.3-70b-versatile`` — fast inference, lower free limit.
 
@@ -19,7 +19,10 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-3.1-flash"
+# Gemini 3.1 Flash model name as of 2026-07
+# Verified via Google AI documentation: gemini-3.1-flash-lite is the correct name.
+# The base 'gemini-3.1-flash' does not exist in the API.
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE = 0.0
 

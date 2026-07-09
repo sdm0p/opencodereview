@@ -357,6 +357,18 @@ class TokenCostCallback:
     def on_chain_end(self, *args, **kwargs) -> None:
         pass
 
+    def on_llm_error(self, error, **kwargs) -> None:
+        pass
+
+    def on_chain_error(self, error, **kwargs) -> None:
+        pass
+
+    def on_tool_error(self, error, **kwargs) -> None:
+        pass
+
+    def on_retriever_error(self, error, **kwargs) -> None:
+        pass
+
     def on_llm_end(self, response, **kwargs) -> None:
         """LangChain callback — called after each LLM invocation.
 
