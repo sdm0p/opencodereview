@@ -55,11 +55,16 @@ def _init_observability() -> None:
     import keyring as _kr
     from config import SERVICE_NAME as _svc
 
-    # LangSmith: favour env var, fall back to keyring
-    ls_key = os.environ.get("LANGCHAIN_API_KEY") or _kr.get_password(_svc, "langsmith_api_key")
+    # LangSmith: favour env var (check modern LANGSMITH_API_KEY first, then legacy)
+    ls_key = (
+        os.environ.get("LANGSMITH_API_KEY")
+        or os.environ.get("LANGCHAIN_API_KEY")
+        or _kr.get_password(_svc, "langsmith_api_key")
+    )
     if ls_key and not is_langsmith_enabled():
         ls_project = (
-            os.environ.get("LANGCHAIN_PROJECT")
+            os.environ.get("LANGSMITH_PROJECT")
+            or os.environ.get("LANGCHAIN_PROJECT")
             or _kr.get_password(_svc, "langsmith_project")
             or "opencodereview"
         )

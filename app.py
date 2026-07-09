@@ -69,10 +69,14 @@ RECOMMENDATION_ICONS = {
 
 def _init_observability_ui() -> None:
     """Initialise observability backends from env vars for the Gradio UI."""
-    # LangSmith: enable if key is in environment
-    ls_key = os.environ.get("LANGCHAIN_API_KEY", "").strip()
+    # LangSmith: enable if key is in environment (check both modern and legacy names)
+    ls_key = (
+        os.environ.get("LANGSMITH_API_KEY", "").strip()
+        or os.environ.get("LANGCHAIN_API_KEY", "").strip()
+    )
     if ls_key and not is_langsmith_enabled():
-        project = os.environ.get("LANGCHAIN_PROJECT", "opencodereview")
+        project = os.environ.get("LANGSMITH_PROJECT",
+                    os.environ.get("LANGCHAIN_PROJECT", "opencodereview"))
         enable_langsmith(ls_key, project)
     if is_langsmith_enabled():
         logger.info("Observability: LangSmith enabled for Gradio UI")

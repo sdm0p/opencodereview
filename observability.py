@@ -38,31 +38,52 @@ logger = logging.getLogger(__name__)
 
 
 def is_langsmith_enabled() -> bool:
-    """Return True if LangSmith tracing is configured via env vars."""
-    return bool(os.environ.get("LANGCHAIN_API_KEY", "").strip())
+    """Return True if LangSmith tracing is configured via env vars.
+
+    Checks both the new ``LANGSMITH_API_KEY`` (preferred) and legacy
+    ``LANGCHAIN_API_KEY`` env vars for backward compatibility.
+    """
+    return bool(
+        os.environ.get("LANGSMITH_API_KEY", "").strip()
+        or os.environ.get("LANGCHAIN_API_KEY", "").strip()
+    )
 
 
 def enable_langsmith(api_key: str, project: str = "") -> None:
-    """Set the environment variables that LangChain/LangGraph reads at runtime.
+    """Set the environment variables that LangSmith reads at runtime.
+
+    Per the official LangSmith docs (https://docs.langchain.com/langsmith/trace-with-langgraph):
+    the modern env vars are ``LANGSMITH_TRACING`` and ``LANGSMITH_API_KEY``.
+    We also set the legacy ``LANGCHAIN_*`` vars for backward compatibility
+    with older LangChain versions.
 
     Call this at startup **before** any LangChain/LangGraph imports so that
     the tracing is active from the first call.
     """
+    # Modern env vars (required by langsmith-sdk >= 0.7)
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_API_KEY"] = api_key
+    # Legacy env vars (backward compat with older LangChain)
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_API_KEY"] = api_key
     if project:
+        os.environ["LANGSMITH_PROJECT"] = project
         os.environ["LANGCHAIN_PROJECT"] = project
     logger.info(
         "LangSmith tracing enabled (project=%s)",
-        project or os.environ.get("LANGCHAIN_PROJECT", "default"),
+        project or os.environ.get("LANGSMITH_PROJECT", "default"),
     )
 
 
 def disable_langsmith() -> None:
     """Remove LangSmith env vars so tracing stops."""
+    # Modern vars
+    os.environ.pop("LANGSMITH_TRACING", None)
+    os.environ.pop("LANGSMITH_API_KEY", None)
+    # Legacy vars
     os.environ.pop("LANGCHAIN_TRACING_V2", None)
     os.environ.pop("LANGCHAIN_API_KEY", None)
-    # Keep LANGCHAIN_PROJECT in case user wants to set it separately
+    # Keep project name in case user wants to set it separately
 
 
 # ─── Langfuse (explicit callback) ──────────────────────────────────────────
