@@ -93,7 +93,12 @@ def get_langfuse_handler():
         # otherwise the handler receives a disabled client that drops traces.
         # Both classes read LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from
         # environment variables automatically.
-        Langfuse()
+        #
+        # The ``x-langfuse-ingestion-version=4`` header is required for the
+        # default OTLP exporter to authenticate properly with Langfuse Cloud.
+        Langfuse(
+            additional_headers={"x-langfuse-ingestion-version": "4"},
+        )
         return CallbackHandler()
     except ImportError:
         logger.warning(
