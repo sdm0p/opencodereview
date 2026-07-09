@@ -7,5 +7,6 @@ keyring>=25
 click>=8.1
 gradio>=4.0
 langchain-groq
+langchain
 chromadb
 langfuse
