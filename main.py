@@ -61,7 +61,7 @@ def _init_observability() -> None:
         or os.environ.get("LANGCHAIN_API_KEY")
         or _kr.get_password(_svc, "langsmith_api_key")
     )
-    if ls_key and not is_langsmith_enabled():
+    if ls_key:
         ls_project = (
             os.environ.get("LANGSMITH_PROJECT")
             or os.environ.get("LANGCHAIN_PROJECT")
