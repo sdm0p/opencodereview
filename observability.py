@@ -5,8 +5,8 @@ Provides a single-entry-point module for all tracing, cost tracking,
 metadata attribution, health checks, and alerting concerns.
 
 Backends
---------
-* **LangSmith** — automatic via ``LANGCHAIN_API_KEY`` / ``LANGCHAIN_PROJECT``
+-------- * **LangSmith** — automatic via ``LANGSMITH_API_KEY`` / ``LANGSMITH_PROJECT``
+ *                (also accepts legacy ``LANGCHAIN_API_KEY`` for back-compat)
   env vars.  LangGraph/LangChain reads these at import time and starts
   tracing without any per-call code.
 * **Langfuse** — explicit ``CallbackHandler`` instantiated only when
