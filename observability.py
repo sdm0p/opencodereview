@@ -357,6 +357,12 @@ class TokenCostCallback:
     def on_chain_end(self, *args, **kwargs) -> None:
         pass
 
+    def on_chat_model_start(self, *args, **kwargs) -> None:
+        pass
+
+    def on_llm_start(self, *args, **kwargs) -> None:
+        pass
+
     def on_llm_error(self, error, **kwargs) -> None:
         pass
 
