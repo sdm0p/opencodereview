@@ -30,8 +30,9 @@ import os
 import platform
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -94,71 +95,32 @@ def disable_langsmith() -> None:
 # ─── Langfuse (explicit callback) ──────────────────────────────────────────
 
 
-def get_langfuse_handler(
-    trace_name: str = "opencodereview",
-    tags: Optional[list[str]] = None,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    metadata: Optional[dict[str, Any]] = None,
-):
-    """Return a Langfuse ``CallbackHandler`` if keys are configured, else None.
+def is_langfuse_enabled() -> bool:
+    """Return True if Langfuse keys are present in the environment."""
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+    sk = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
+    return bool(pk and sk)
 
-    Parameters
-    ----------
-    trace_name : str
-        Name for the trace in Langfuse (e.g. ``"opencodereview/review/psf/requests#42"``).
-    tags : list[str] or None
-        Tags attached to the trace for filtering in the Langfuse UI.
-    user_id : str or None
-        User identifier associated with the trace.
-    session_id : str or None
-        Session identifier for grouping related traces.
-    metadata : dict or None
-        Additional metadata to attach to the trace.
 
-    Reads ``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, and optionally
-    ``LANGFUSE_HOST`` from environment variables.  In langfuse v4+ the
-    ``CallbackHandler`` only needs ``public_key``; the SDK reads
-    ``LANGFUSE_SECRET_KEY`` and ``LANGFUSE_HOST`` from the environment
-    automatically.
+def get_langfuse_handler():
+    """Return a bare Langfuse ``CallbackHandler`` if keys are configured, else None.
+
+    In langfuse v4+ the ``CallbackHandler`` constructor only accepts
+    ``public_key`` and ``trace_context`` — trace-level metadata (name, tags,
+    user_id, session_id, metadata) is set via the ``propagate_attributes()``
+    context manager instead.  Use :func:`langfuse_trace` to wrap your graph
+    execution with proper trace attributes.
     """
-    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
-    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
-
-    if not public_key or not secret_key:
+    if not is_langfuse_enabled():
         return None
 
     try:
-        from langfuse import Langfuse
         from langfuse.langchain import CallbackHandler
 
-        # In langfuse v4+, the CallbackHandler uses get_client() to look up
-        # an existing Langfuse client instance by public_key.  We must
-        # initialise the client first so that get_client() finds it;
-        # otherwise the handler receives a disabled client that drops traces.
-        # Both classes read LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from
-        # environment variables automatically.
-        #
-        # The ``x-langfuse-ingestion-version=4`` header is required for the
-        # default OTLP exporter to authenticate properly with Langfuse Cloud.
-        Langfuse(
-            additional_headers={"x-langfuse-ingestion-version": "4"},
-        )
-        # Build handler kwargs dynamically so we only pass parameters the
-        # installed langfuse version supports.  ``metadata`` in particular
-        # was added in v4.x — skip it to avoid TypeError on older SDKs.
-        # Metadata is still attached to traces after the fact via
-        # ``update_langfuse_trace()``.
-        handler_kwargs: dict[str, Any] = {
-            "trace_name": trace_name,
-            "tags": tags or [],
-        }
-        if user_id is not None:
-            handler_kwargs["user_id"] = user_id
-        if session_id is not None:
-            handler_kwargs["session_id"] = session_id
-
-        return CallbackHandler(**handler_kwargs)
+        # CallbackHandler reads env vars automatically in v4+.
+        # No trace metadata params are passed — those go through
+        # propagate_attributes() instead.
+        return CallbackHandler()
     except ImportError:
         logger.warning(
             "langfuse not available — skipping tracing",
@@ -174,11 +136,75 @@ def get_langfuse_handler(
         return None
 
 
-def is_langfuse_enabled() -> bool:
-    """Return True if Langfuse keys are present in the environment."""
-    pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
-    sk = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
-    return bool(pk and sk)
+@contextmanager
+def langfuse_trace(
+    trace_name: str = "opencodereview",
+    tags: Optional[list[str]] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> Generator[Any, None, None]:
+    """Context manager that wraps a LangGraph execution block in Langfuse trace attributes.
+
+    In langfuse v4+, trace-level metadata (name, tags, user_id, session_id,
+    metadata) must be set via the ``propagate_attributes()`` context manager
+    rather than passed to ``CallbackHandler()``.  This helper creates the
+    handler and the ``propagate_attributes`` wrapper in one step.
+
+    Usage
+    -----
+        with langfuse_trace(
+            trace_name="opencodereview/review/psf/requests#42",
+            tags=["gradio_ui", "psf/requests"],
+            session_id=thread_id,
+            metadata={"repo": "psf/requests", "pr_number": 42},
+        ) as handler:
+            if handler:
+                config["callbacks"].append(handler)
+            graph.stream(initial_state, config)
+    """
+    handler = None
+    if not is_langfuse_enabled():
+        yield None
+        return
+
+    try:
+        from langfuse.langchain import CallbackHandler
+
+        handler = CallbackHandler()
+    except Exception:
+        yield None
+        return
+
+    # Build propagate_attributes kwargs
+    attrs: dict[str, Any] = {}
+    if trace_name:
+        attrs["trace_name"] = trace_name
+    if tags:
+        attrs["tags"] = tags
+    if user_id:
+        attrs["user_id"] = user_id
+    if session_id:
+        attrs["session_id"] = session_id
+    if metadata:
+        attrs["metadata"] = metadata
+
+    if attrs:
+        try:
+            from langfuse import propagate_attributes as _propagate_attributes
+        except Exception as exc:
+            logger.debug(
+                "propagate_attributes not available — yielding bare handler: %s",
+                exc,
+            )
+            yield handler
+            return
+
+        # yield is OUTSIDE try/except so user-code exceptions propagate
+        with _propagate_attributes(**attrs):
+            yield handler
+    else:
+        yield handler
 
 
 # ─── Run metadata ──────────────────────────────────────────────────────────
@@ -541,6 +567,41 @@ class TokenCostCallback:
 # ─── Score logging ──────────────────────────────────────────────────────────
 
 
+def _resolve_langfuse_trace_id(handler: Any) -> Optional[str]:
+    """Resolve the current Langfuse trace ID from handler or context.
+
+    Tries, in order:
+    1. ``handler.trace_id`` (langfuse v3-style — likely None on v4+)
+    2. ``handler.last_trace_id`` (langfuse v4+)
+    3. ``Langfuse().get_current_trace_id()`` (langfuse v4+, works
+       inside ``propagate_attributes`` context)
+    """
+    if handler is not None:
+        try:
+            tid = getattr(handler, "trace_id", None)
+            if tid:
+                return tid
+        except Exception:
+            pass
+        try:
+            tid = getattr(handler, "last_trace_id", None)
+            if tid:
+                return tid
+        except Exception:
+            pass
+
+    try:
+        from langfuse import Langfuse
+
+        tid = Langfuse().get_current_trace_id()
+        if tid:
+            return tid
+    except Exception:
+        pass
+
+    return None
+
+
 def log_langfuse_score(
     name: str,
     value: float,
@@ -551,11 +612,9 @@ def log_langfuse_score(
     """Log a numeric score to Langfuse, linked to a specific trace.
 
     Requires Langfuse to be enabled (keys in environment).  The score is
-    associated with a trace by ``trace_id``.  If ``handler`` is provided
-    (a Langfuse ``CallbackHandler``) and ``trace_id`` is not explicitly
-    set, the function will extract the trace ID from the handler's
-    ``.trace_id`` attribute — this ensures the score appears directly
-    on the trace in the Langfuse UI rather than as a standalone score.
+    associated with a trace by ``trace_id``.  If neither ``trace_id`` nor
+    a resolvable handler is provided, the score is logged without a trace
+    link (appears in the Scores tab but not on the trace detail page).
 
     Parameters
     ----------
@@ -566,22 +625,14 @@ def log_langfuse_score(
     comment : str or None
         Optional human-readable comment.
     trace_id : str or None
-        Explicit trace ID.  If ``None`` but ``handler`` is provided,
-        the handler's ``.trace_id`` is used.
+        Explicit trace ID.  If ``None``, attempts to resolve via handler.
     handler : Langfuse CallbackHandler or None
-        Langfuse ``CallbackHandler`` from which to extract the trace ID
-        after the graph run completes.
+        Langfuse ``CallbackHandler`` from which to extract the trace ID.
     """
     if not is_langfuse_enabled():
         return
 
-    # Auto-extract trace_id from handler if not explicitly provided
-    resolved_trace_id = trace_id
-    if resolved_trace_id is None and handler is not None:
-        try:
-            resolved_trace_id = getattr(handler, "trace_id", None)
-        except Exception:
-            pass
+    resolved_trace_id = trace_id or _resolve_langfuse_trace_id(handler)
 
     try:
         from langfuse import Langfuse
@@ -623,21 +674,14 @@ def update_langfuse_trace(
     metadata : dict or None
         Metadata to merge into the trace.
     trace_id : str or None
-        Explicit trace ID.  If ``None`` but ``handler`` is provided,
-        the handler's ``.trace_id`` is used.
+        Explicit trace ID.  If ``None``, attempts to resolve via handler.
     handler : Langfuse CallbackHandler or None
         Langfuse ``CallbackHandler`` from which to extract the trace ID.
     """
     if not is_langfuse_enabled():
         return
 
-    # Auto-extract trace_id from handler if not explicitly provided
-    resolved_trace_id = trace_id
-    if resolved_trace_id is None and handler is not None:
-        try:
-            resolved_trace_id = getattr(handler, "trace_id", None)
-        except Exception:
-            pass
+    resolved_trace_id = trace_id or _resolve_langfuse_trace_id(handler)
 
     try:
         from langfuse import Langfuse

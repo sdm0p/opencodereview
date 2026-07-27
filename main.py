@@ -31,6 +31,7 @@ from observability import (
     is_langsmith_enabled,
     estimate_groq_cost,
     format_cost,
+    langfuse_trace,
     log_error_to_backends,
     log_langfuse_score,
     update_langfuse_trace,
@@ -204,17 +205,6 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
         "test_coverage": "v1",
         "aggregator": "v1",
     }
-    handler = get_langfuse_handler(
-        trace_name=trace_name,
-        tags=tags,
-        session_id=thread_id,
-        metadata={
-            "source": "cli",
-            "repo": repo,
-            "pr_number": pr_number,
-            "prompt_versions": prompt_versions,
-        },
-    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="cli", repo=repo, pr_number=pr_number,
@@ -225,11 +215,6 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
         "configurable": {"thread_id": f"hitl-{thread_id}"},
         "metadata": metadata,
     }
-    # Build callbacks list with cost tracker + optional Langfuse
-    callbacks = [cost_tracker]
-    if handler:
-        callbacks.append(handler)
-    config["callbacks"] = callbacks
 
     # Use synthetic demo data by default; only fetch real PRs when the
     # user explicitly provides a custom repo or PR number.
@@ -250,109 +235,125 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
             "pr_number": pr_number,
         }
 
-    t0 = time.time()
-    for event in graph.stream(initial_state, config):
-        for node_name in event:
-            label = NODE_LABELS.get(node_name, node_name)
-            logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
-    logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
+    with langfuse_trace(
+        trace_name=trace_name,
+        tags=tags,
+        session_id=thread_id,
+        metadata={
+            "source": "cli",
+            "repo": repo,
+            "pr_number": pr_number,
+            "prompt_versions": prompt_versions,
+        },
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
 
-    state = graph.get_state(config)
-    tasks = state.tasks
+        t0 = time.time()
+        for event in graph.stream(initial_state, config):
+            for node_name in event:
+                label = NODE_LABELS.get(node_name, node_name)
+                logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+        logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
 
-    if tasks:
-        logger.info("\n" + "=" * 60)
-        logger.info("  REVIEW RESULTS — HUMAN APPROVAL REQUIRED")
-        logger.info("=" * 60)
+        state = graph.get_state(config)
+        tasks = state.tasks
 
-        if state.values.get("verdict"):
-            v = state.values["verdict"]
-            logger.info("  Verdict: %s", v.recommendation.upper())
-            logger.info("  Score:   %.1f/10", v.overall_score)
-            logger.info("  Summary: %s", v.summary)
+        if tasks:
+            logger.info("\n" + "=" * 60)
+            logger.info("  REVIEW RESULTS — HUMAN APPROVAL REQUIRED")
+            logger.info("=" * 60)
 
-        final_findings = state.values.get("final_findings", [])
-        logger.info("  Findings: %d", len(final_findings))
-        for i, f in enumerate(final_findings, 1):
-            logger.info(
-                "    %d. [%.0f%%] %s:%d–%d (%s)",
-                i, f.confidence * 100, f.file_path,
-                f.line_start, f.line_end, f.severity.value,
-            )
-            logger.info("       %s", f.comment[:120])
+            if state.values.get("verdict"):
+                v = state.values["verdict"]
+                logger.info("  Verdict: %s", v.recommendation.upper())
+                logger.info("  Score:   %.1f/10", v.overall_score)
+                logger.info("  Summary: %s", v.summary)
 
-        # Show cost & TTFT
-        logger.info("  %s", cost_tracker.summary())
+            final_findings = state.values.get("final_findings", [])
+            logger.info("  Findings: %d", len(final_findings))
+            for i, f in enumerate(final_findings, 1):
+                logger.info(
+                    "    %d. [%.0f%%] %s:%d–%d (%s)",
+                    i, f.confidence * 100, f.file_path,
+                    f.line_start, f.line_end, f.severity.value,
+                )
+                logger.info("       %s", f.comment[:120])
 
-        # Log verdict score to Langfuse and update trace metadata
-        if state.values.get("verdict"):
-            v = state.values["verdict"]
-            log_langfuse_score(
-                name="verdict_score",
-                value=v.overall_score,
-                comment=f"{repo}#{pr_number} — {v.recommendation}: {v.summary[:100]}",
-                handler=handler,
-            )
-            log_langfuse_score(
-                name="findings_count",
-                value=len(final_findings),
-                comment=f"{repo}#{pr_number}",
-                handler=handler,
-            )
-            if handler:
-                update_langfuse_trace(
-                    tags=tags + [f"verdict:{v.recommendation}"],
-                    metadata={
-                        "verdict_score": v.overall_score,
-                        "findings_count": len(final_findings),
-                        "recommendation": v.recommendation,
-                    },
-                    trace_name=trace_name,
+            # Show cost & TTFT
+            logger.info("  %s", cost_tracker.summary())
+
+            # Log verdict score to Langfuse and update trace metadata
+            if state.values.get("verdict"):
+                v = state.values["verdict"]
+                log_langfuse_score(
+                    name="verdict_score",
+                    value=v.overall_score,
+                    comment=f"{repo}#{pr_number} — {v.recommendation}: {v.summary[:100]}",
                     handler=handler,
                 )
+                log_langfuse_score(
+                    name="findings_count",
+                    value=len(final_findings),
+                    comment=f"{repo}#{pr_number}",
+                    handler=handler,
+                )
+                if handler:
+                    update_langfuse_trace(
+                        tags=tags + [f"verdict:{v.recommendation}"],
+                        metadata={
+                            "verdict_score": v.overall_score,
+                            "findings_count": len(final_findings),
+                            "recommendation": v.recommendation,
+                        },
+                        trace_name=trace_name,
+                        handler=handler,
+                    )
 
-        logger.info("=" * 60)
+            logger.info("=" * 60)
 
-        click.echo()
-        click.echo("-" * 50)
-        click.echo("  HUMAN-IN-THE-LOOP: Approve this review for posting?")
-        click.echo("-" * 50)
-        click.echo("  [a] Approve — post findings as GitHub comments")
-        click.echo("  [r] Reject  — discard results, post nothing")
-        click.echo("  [q] Quit    — leave graph paused")
-        click.echo()
+            click.echo()
+            click.echo("-" * 50)
+            click.echo("  HUMAN-IN-THE-LOOP: Approve this review for posting?")
+            click.echo("-" * 50)
+            click.echo("  [a] Approve — post findings as GitHub comments")
+            click.echo("  [r] Reject  — discard results, post nothing")
+            click.echo("  [q] Quit    — leave graph paused")
+            click.echo()
 
-        choice = click.prompt("  Your choice", type=click.Choice(["a", "r", "q"], case_sensitive=False))
+            choice = click.prompt("  Your choice", type=click.Choice(["a", "r", "q"], case_sensitive=False))
 
-        if choice == "a":
-            logger.info("  → Approved! Resuming graph to post results …")
-            graph.invoke(Command(resume={"action": "approve"}), config)
-        elif choice == "r":
-            logger.info("  → Rejected. Resuming graph without posting …")
-            graph.invoke(Command(resume={"action": "reject"}), config)
+            if choice == "a":
+                logger.info("  → Approved! Resuming graph to post results …")
+                graph.invoke(Command(resume={"action": "approve"}), config)
+            elif choice == "r":
+                logger.info("  → Rejected. Resuming graph without posting …")
+                graph.invoke(Command(resume={"action": "reject"}), config)
+            else:
+                logger.info("  → Exiting. Graph remains paused — resume later")
+                logger.info(
+                    "    Resume with: graph.invoke(Command(resume=...), %s)",
+                    config,
+                )
+                return
+
+            final_state = graph.get_state(config)
+            final_values = final_state.values
+
+            logger.info("\n" + "=" * 60)
+            logger.info("  FINAL STATE")
+            logger.info("=" * 60)
+            logger.info("  Human approved: %s", final_values.get("human_approved"))
+            if final_values.get("verdict"):
+                logger.info("  Verdict: %s", final_values["verdict"].recommendation)
+            logger.info("  Final findings: %d", len(final_values.get("final_findings", [])))
+            logger.info("  %s", cost_tracker.summary())
+            logger.info("=" * 60)
         else:
-            logger.info("  → Exiting. Graph remains paused — resume later")
-            logger.info(
-                "    Resume with: graph.invoke(Command(resume=...), %s)",
-                config,
-            )
-            return
-
-        final_state = graph.get_state(config)
-        final_values = final_state.values
-
-        logger.info("\n" + "=" * 60)
-        logger.info("  FINAL STATE")
-        logger.info("=" * 60)
-        logger.info("  Human approved: %s", final_values.get("human_approved"))
-        if final_values.get("verdict"):
-            logger.info("  Verdict: %s", final_values["verdict"].recommendation)
-        logger.info("  Final findings: %d", len(final_values.get("final_findings", [])))
-        logger.info("  %s", cost_tracker.summary())
-        logger.info("=" * 60)
-    else:
-        logger.info("Graph completed without interrupt (no findings to review?)")
-        logger.info("  %s", cost_tracker.summary())
+            logger.info("Graph completed without interrupt (no findings to review?)")
+            logger.info("  %s", cost_tracker.summary())
 
 
 def _test_offline(graph) -> None:
@@ -364,12 +365,6 @@ def _test_offline(graph) -> None:
         "test_coverage": "v1",
         "aggregator": "v1",
     }
-    handler = get_langfuse_handler(
-        trace_name="opencodereview/smoke-test",
-        tags=["cli", "smoke", "demo-org/demo-repo"],
-        session_id=thread_id,
-        metadata={"prompt_versions": prompt_versions},
-    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="cli", repo="demo-org/demo-repo", pr_number=1,
@@ -380,35 +375,42 @@ def _test_offline(graph) -> None:
         "configurable": {"thread_id": f"smoke-{thread_id}"},
         "metadata": metadata,
     }
-    callbacks = [cost_tracker]
-    if handler:
-        callbacks.append(handler)
-    config["callbacks"] = callbacks
 
-    t0 = time.time()
-    for event in graph.stream(SYNTHETIC_STATE, config):
-        for node_name in event:
-            label = NODE_LABELS.get(node_name, node_name)
-            logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
-    logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
-    state = graph.get_state(config)
-    tasks = state.tasks
-    values = state.values
+    with langfuse_trace(
+        trace_name="opencodereview/smoke-test",
+        tags=["cli", "smoke", "demo-org/demo-repo"],
+        session_id=thread_id,
+        metadata={"prompt_versions": prompt_versions},
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
 
-    verdict = values.get("verdict")
-    final_findings = values.get("final_findings", [])
+        t0 = time.time()
+        for event in graph.stream(SYNTHETIC_STATE, config):
+            for node_name in event:
+                label = NODE_LABELS.get(node_name, node_name)
+                logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+        logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
+        state = graph.get_state(config)
+        tasks = state.tasks
+        values = state.values
 
-    logger.info("Smoke test: paused=True, tasks=%d, findings=%d, verdict=%s",
-                len(tasks), len(final_findings),
-                verdict.recommendation if verdict else 'None')
-    logger.info("%s", cost_tracker.summary())
+        verdict = values.get("verdict")
+        final_findings = values.get("final_findings", [])
 
-    assert len(tasks) > 0, "Graph did not pause at interrupt"
-    assert verdict is not None, "No verdict produced"
-    assert len(final_findings) >= 0, "Missing final_findings"
+        logger.info("Smoke test: paused=True, tasks=%d, findings=%d, verdict=%s",
+                    len(tasks), len(final_findings),
+                    verdict.recommendation if verdict else 'None')
+        logger.info("%s", cost_tracker.summary())
 
-    graph.invoke(Command(resume={"action": "reject"}), config)
-    logger.info("Smoke test: resume OK, graph completed")
+        assert len(tasks) > 0, "Graph did not pause at interrupt"
+        assert verdict is not None, "No verdict produced"
+        assert len(final_findings) >= 0, "Missing final_findings"
+
+        graph.invoke(Command(resume={"action": "reject"}), config)
+        logger.info("Smoke test: resume OK, graph completed")
 
 
 def _cleanup_db() -> None:

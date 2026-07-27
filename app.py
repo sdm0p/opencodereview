@@ -30,6 +30,7 @@ from observability import (
     is_langsmith_enabled,
     estimate_groq_cost,
     format_cost,
+    langfuse_trace,
     log_error_to_backends,
     log_langfuse_score,
     HealthStatus,
@@ -100,17 +101,6 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
         "test_coverage": "v1",
         "aggregator": "v1",
     }
-    handler = get_langfuse_handler(
-        trace_name=trace_name,
-        tags=tags,
-        session_id=thread_id,
-        metadata={
-            "source": "gradio_ui",
-            "repo": repo,
-            "pr_number": pr_number,
-            "prompt_versions": prompt_versions,
-        },
-    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="gradio_ui", repo=repo, pr_number=pr_number,
@@ -121,41 +111,56 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
         "configurable": {"thread_id": f"web-{thread_id}"},
         "metadata": metadata,
     }
-    callbacks = [cost_tracker]
-    if handler:
-        callbacks.append(handler)
-    config["callbacks"] = callbacks
 
-    try:
-        t0 = time.time()
-        initial = {"repo": repo, "pr_number": pr_number}
-        for event in graph.stream(initial, config):
-            for node_name in event:
-                label = NODE_LABELS.get(node_name, node_name)
-                logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
-        logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
-    except Exception as exc:
-        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
-        raise
+    # Use langfuse_trace context manager which sets trace metadata via
+    # propagate_attributes() (langfuse v4+ API) and yields the handler.
+    with langfuse_trace(
+        trace_name=trace_name,
+        tags=tags,
+        session_id=thread_id,
+        metadata={
+            "source": "gradio_ui",
+            "repo": repo,
+            "pr_number": pr_number,
+            "prompt_versions": prompt_versions,
+        },
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
 
-    state = graph.get_state(config)
+        try:
+            t0 = time.time()
+            initial = {"repo": repo, "pr_number": pr_number}
+            for event in graph.stream(initial, config):
+                for node_name in event:
+                    label = NODE_LABELS.get(node_name, node_name)
+                    logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+            logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
+        except Exception as exc:
+            log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
+            raise
 
-    # Log verdict and findings scores to Langfuse (linked to trace via handler)
-    verdict = state.values.get("verdict")
-    findings = state.values.get("final_findings", [])
-    if verdict:
-        log_langfuse_score(
-            name="verdict_score",
-            value=verdict.overall_score,
-            comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
-            handler=handler,
-        )
-        log_langfuse_score(
-            name="findings_count",
-            value=len(findings),
-            comment=f"{repo}#{pr_number}",
-            handler=handler,
-        )
+        state = graph.get_state(config)
+
+        # Log verdict and findings scores to Langfuse (still within
+        # propagate_attributes context to get trace_id resolution)
+        verdict = state.values.get("verdict")
+        findings = state.values.get("final_findings", [])
+        if verdict:
+            log_langfuse_score(
+                name="verdict_score",
+                value=verdict.overall_score,
+                comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
+                handler=handler,
+            )
+            log_langfuse_score(
+                name="findings_count",
+                value=len(findings),
+                comment=f"{repo}#{pr_number}",
+                handler=handler,
+            )
 
     return state, config, cost_tracker.summary()
 
@@ -328,10 +333,7 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
 
     config = json.loads(config_json)
     graph = build_graph(DB_PATH)
-    handler = get_langfuse_handler(
-        trace_name="opencodereview/resume",
-        tags=["gradio_ui", "resume"],
-    )
+    handler = get_langfuse_handler()
     cost_tracker = TokenCostCallback()
     callbacks = [cost_tracker]
     if handler:
@@ -370,12 +372,6 @@ def run_smoke(progress=gr.Progress()):
         "test_coverage": "v1",
         "aggregator": "v1",
     }
-    handler = get_langfuse_handler(
-        trace_name="opencodereview/smoke-test",
-        tags=["gradio_ui", "smoke", "demo-org/demo-repo"],
-        session_id=thread_id,
-        metadata={"prompt_versions": prompt_versions},
-    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="gradio_ui", repo="demo-org/demo-repo", pr_number=1,
@@ -386,18 +382,26 @@ def run_smoke(progress=gr.Progress()):
         "configurable": {"thread_id": f"smoke-web-{thread_id}"},
         "metadata": metadata,
     }
-    callbacks = [cost_tracker]
-    if handler:
-        callbacks.append(handler)
-    config["callbacks"] = callbacks
 
     progress(0.3, desc="Running on synthetic data…")
-    try:
-        list(graph.stream(SYNTHETIC_STATE, config))
-    except Exception as exc:
-        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "smoke_stream"})
-        logger.exception("Smoke test failed: %s", exc)
-        raise
+    with langfuse_trace(
+        trace_name="opencodereview/smoke-test",
+        tags=["gradio_ui", "smoke", "demo-org/demo-repo"],
+        session_id=thread_id,
+        metadata={"prompt_versions": prompt_versions},
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
+
+        try:
+            list(graph.stream(SYNTHETIC_STATE, config))
+        except Exception as exc:
+            log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "smoke_stream"})
+            logger.exception("Smoke test failed: %s", exc)
+            raise
+
     state = graph.get_state(config)
     tasks = state.tasks
 
