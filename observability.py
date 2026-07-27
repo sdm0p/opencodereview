@@ -144,13 +144,21 @@ def get_langfuse_handler(
         Langfuse(
             additional_headers={"x-langfuse-ingestion-version": "4"},
         )
-        return CallbackHandler(
-            trace_name=trace_name,
-            tags=tags or [],
-            user_id=user_id,
-            session_id=session_id,
-            metadata=metadata,
-        )
+        # Build handler kwargs dynamically so we only pass parameters the
+        # installed langfuse version supports.  ``metadata`` in particular
+        # was added in v4.x — skip it to avoid TypeError on older SDKs.
+        # Metadata is still attached to traces after the fact via
+        # ``update_langfuse_trace()``.
+        handler_kwargs: dict[str, Any] = {
+            "trace_name": trace_name,
+            "tags": tags or [],
+        }
+        if user_id is not None:
+            handler_kwargs["user_id"] = user_id
+        if session_id is not None:
+            handler_kwargs["session_id"] = session_id
+
+        return CallbackHandler(**handler_kwargs)
     except ImportError:
         logger.warning(
             "langfuse not available — skipping tracing",
