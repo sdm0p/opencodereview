@@ -44,7 +44,7 @@ import urllib.error
 from graph import build_graph
 from langgraph.types import Command
 from main import SYNTHETIC_STATE
-from observability import TokenCostCallback, get_langfuse_handler, build_run_metadata
+from observability import TokenCostCallback, build_run_metadata, langfuse_trace
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,11 +89,6 @@ def _run_smoke_test() -> dict[str, Any]:
     db_path = str(_project_root / "alert_checkpoints.db")
     graph = build_graph(db_path)
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler(
-        trace_name="opencodereview/alert-check",
-        tags=["cli", "alert", "demo-org/demo-repo"],
-        session_id=thread_id,
-    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="cli", repo="demo-org/demo-repo",
@@ -103,72 +98,83 @@ def _run_smoke_test() -> dict[str, Any]:
         "configurable": {"thread_id": f"alert-{thread_id}"},
         "metadata": metadata,
     }
-    callbacks = [cost_tracker]
-    if handler:
-        callbacks.append(handler)
-    config["callbacks"] = callbacks
 
-    try:
-        list(graph.stream(SYNTHETIC_STATE, config))
-        state = graph.get_state(config)
-        tasks = state.tasks
-        values = state.values
+    _alert_trace_ctx = _langfuse_trace(
+        trace_name="opencodereview/alert-check",
+        tags=["cli", "alert", "demo-org/demo-repo"],
+        session_id=thread_id,
+    )
+    with _langfuse_trace(
+        trace_name="opencodereview/alert-check",
+        tags=["cli", "alert", "demo-org/demo-repo"],
+        session_id=thread_id,
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
 
-        if not tasks:
-            # Graph completed without findings
-            verdict = values.get("verdict")
-            score = verdict.overall_score if verdict else 0.0
-            result = {
-                "success": True,
-                "score": score,
-                "verdict": verdict.recommendation if verdict else "none",
-                "findings_count": len(values.get("final_findings", [])),
-                "cost": cost_tracker.summary(),
-                "error": None,
+        try:
+            list(graph.stream(SYNTHETIC_STATE, config))
+            state = graph.get_state(config)
+            tasks = state.tasks
+            values = state.values
+
+            if not tasks:
+                # Graph completed without findings
+                verdict = values.get("verdict")
+                score = verdict.overall_score if verdict else 0.0
+                result = {
+                    "success": True,
+                    "score": score,
+                    "verdict": verdict.recommendation if verdict else "none",
+                    "findings_count": len(values.get("final_findings", [])),
+                    "cost": cost_tracker.summary(),
+                    "error": None,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                # Resume with reject to complete
+                graph.invoke(Command(resume={"action": "reject"}), config)
+                final_state = graph.get_state(config)
+                verdict = final_state.values.get("verdict")
+                findings = final_state.values.get("final_findings", [])
+                score = verdict.overall_score if verdict else 0.0
+                result = {
+                    "success": True,
+                    "score": score,
+                    "verdict": verdict.recommendation if verdict else "none",
+                    "findings_count": len(findings),
+                    "cost": cost_tracker.summary(),
+                    "error": None,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+
+            # Cleanup
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                except PermissionError:
+                    pass
+
+            return result
+
+        except Exception as exc:
+            # Cleanup on error
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                except PermissionError:
+                    pass
+            return {
+                "success": False,
+                "score": 0.0,
+                "verdict": "error",
+                "findings_count": 0,
+                "cost": "N/A",
+                "error": str(exc),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-        else:
-            # Resume with reject to complete
-            graph.invoke(Command(resume={"action": "reject"}), config)
-            final_state = graph.get_state(config)
-            verdict = final_state.values.get("verdict")
-            findings = final_state.values.get("final_findings", [])
-            score = verdict.overall_score if verdict else 0.0
-            result = {
-                "success": True,
-                "score": score,
-                "verdict": verdict.recommendation if verdict else "none",
-                "findings_count": len(findings),
-                "cost": cost_tracker.summary(),
-                "error": None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-
-        # Cleanup
-        if os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-            except PermissionError:
-                pass
-
-        return result
-
-    except Exception as exc:
-        # Cleanup on error
-        if os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-            except PermissionError:
-                pass
-        return {
-            "success": False,
-            "score": 0.0,
-            "verdict": "error",
-            "findings_count": 0,
-            "cost": "N/A",
-            "error": str(exc),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
 
 
 # ─── Webhook notification ────────────────────────────────────────────────────
