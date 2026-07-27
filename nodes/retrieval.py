@@ -167,6 +167,35 @@ def _should_include(path: str) -> bool:
 # ─── Helpers: building the vector store ─────────────────────────────────────
 
 
+# ─── Global embedding-function cache ────────────────────────────────────────
+# The ChromaDB SentenceTransformer embedding function loads a ~90 MB PyTorch
+# model from disk every time it is instantiated, which takes ~20 s.  Cache it
+# at module level and prefer the ONNX variant (loads in <1 s).
+_EMBEDDING_FN = None
+
+
+def _get_embedding_fn():
+    """Return a cached embedding function (ONNX MiniLM, loaded once per process)."""
+    global _EMBEDDING_FN
+    if _EMBEDDING_FN is not None:
+        return _EMBEDDING_FN
+    # Prefer the ONNX-optimised variant (loads <1 s vs ~20 s for PyTorch)
+    if hasattr(embedding_functions, "ONNXMiniLM_L6_V2"):
+        logger.info("Using ONNX MiniLM embedding function (faster load)")
+        _EMBEDDING_FN = embedding_functions.ONNXMiniLM_L6_V2()
+    elif hasattr(embedding_functions, "SentenceTransformerEmbeddingFunction"):
+        logger.info("Using SentenceTransformer embedding function")
+        _EMBEDDING_FN = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="all-MiniLM-L6-v2"
+        )
+    else:
+        raise RuntimeError(
+            "No usable ChromaDB embedding function found. Install with: "
+            "pip install chromadb (includes ONNX MiniLM support)"
+        )
+    return _EMBEDDING_FN
+
+
 _VECTOR_DIR: str | None = None
 
 
@@ -202,9 +231,7 @@ def _get_or_build_collection(
     if chromadb is None:
         raise RuntimeError("chromadb is not installed — cannot build vector store")
 
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="all-MiniLM-L6-v2"
-    )
+    ef = _get_embedding_fn()
     client = chromadb.PersistentClient(path=_ensure_vector_dir())
     coll_name = _repo_collection_name(f"{owner}/{repo_name}")
 
@@ -224,7 +251,12 @@ def _get_or_build_collection(
         )
         client.delete_collection(coll_name)
     except Exception:
-        pass  # First build or error → create fresh
+        # Collection doesn't exist or is incompatible (e.g. different
+        # embedding function class) — delete any remnants and create fresh.
+        try:
+            client.delete_collection(coll_name)
+        except Exception:
+            pass
 
     return _build_vector_store(
         owner, repo_name, head_sha, exclude_paths, client, coll_name, ef,
