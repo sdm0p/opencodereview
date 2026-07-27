@@ -31,6 +31,7 @@ from observability import (
     estimate_groq_cost,
     format_cost,
     log_error_to_backends,
+    log_langfuse_score,
     HealthStatus,
     TokenCostCallback,
     check_groq_connectivity,
@@ -91,10 +92,30 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
     """Build the graph, stream up to the interrupt, and return state + config."""
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler()
+    trace_name = f"opencodereview/review/{repo}#{pr_number}"
+    tags = ["gradio_ui", repo]
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    handler = get_langfuse_handler(
+        trace_name=trace_name,
+        tags=tags,
+        session_id=thread_id,
+        metadata={
+            "source": "gradio_ui",
+            "repo": repo,
+            "pr_number": pr_number,
+            "prompt_versions": prompt_versions,
+        },
+    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
-        source="gradio_ui", repo=repo, pr_number=pr_number, session_id=thread_id,
+        source="gradio_ui", repo=repo, pr_number=pr_number,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
     )
     config: dict = {
         "configurable": {"thread_id": f"web-{thread_id}"},
@@ -118,6 +139,24 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
         raise
 
     state = graph.get_state(config)
+
+    # Log verdict and findings scores to Langfuse (linked to trace via handler)
+    verdict = state.values.get("verdict")
+    findings = state.values.get("final_findings", [])
+    if verdict:
+        log_langfuse_score(
+            name="verdict_score",
+            value=verdict.overall_score,
+            comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
+            handler=handler,
+        )
+        log_langfuse_score(
+            name="findings_count",
+            value=len(findings),
+            comment=f"{repo}#{pr_number}",
+            handler=handler,
+        )
+
     return state, config, cost_tracker.summary()
 
 
@@ -289,7 +328,10 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
 
     config = json.loads(config_json)
     graph = build_graph(DB_PATH)
-    handler = get_langfuse_handler()
+    handler = get_langfuse_handler(
+        trace_name="opencodereview/resume",
+        tags=["gradio_ui", "resume"],
+    )
     cost_tracker = TokenCostCallback()
     callbacks = [cost_tracker]
     if handler:
@@ -322,10 +364,23 @@ def run_smoke(progress=gr.Progress()):
     progress(0.1, desc="Building graph…")
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler()
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    handler = get_langfuse_handler(
+        trace_name="opencodereview/smoke-test",
+        tags=["gradio_ui", "smoke", "demo-org/demo-repo"],
+        session_id=thread_id,
+        metadata={"prompt_versions": prompt_versions},
+    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
-        source="gradio_ui", repo="demo-org/demo-repo", pr_number=1, session_id=thread_id,
+        source="gradio_ui", repo="demo-org/demo-repo", pr_number=1,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
     )
     config: dict = {
         "configurable": {"thread_id": f"smoke-web-{thread_id}"},

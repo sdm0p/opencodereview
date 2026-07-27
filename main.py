@@ -32,6 +32,8 @@ from observability import (
     estimate_groq_cost,
     format_cost,
     log_error_to_backends,
+    log_langfuse_score,
+    update_langfuse_trace,
     TokenCostCallback,
 )
 from state import ChangedFile, ContextChunk, Finding, Severity, Verdict
@@ -194,10 +196,30 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
     """Run the graph on a real PR — fetches data from GitHub, pauses for
     human approval, then posts findings back as PR comments."""
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler()
+    trace_name = f"opencodereview/review/{repo}#{pr_number}"
+    tags = ["cli", repo]
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    handler = get_langfuse_handler(
+        trace_name=trace_name,
+        tags=tags,
+        session_id=thread_id,
+        metadata={
+            "source": "cli",
+            "repo": repo,
+            "pr_number": pr_number,
+            "prompt_versions": prompt_versions,
+        },
+    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
-        source="cli", repo=repo, pr_number=pr_number, session_id=thread_id,
+        source="cli", repo=repo, pr_number=pr_number,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
     )
     config: dict = {
         "configurable": {"thread_id": f"hitl-{thread_id}"},
@@ -259,8 +281,35 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
             )
             logger.info("       %s", f.comment[:120])
 
-        # Show cost
+        # Show cost & TTFT
         logger.info("  %s", cost_tracker.summary())
+
+        # Log verdict score to Langfuse and update trace metadata
+        if state.values.get("verdict"):
+            v = state.values["verdict"]
+            log_langfuse_score(
+                name="verdict_score",
+                value=v.overall_score,
+                comment=f"{repo}#{pr_number} — {v.recommendation}: {v.summary[:100]}",
+                handler=handler,
+            )
+            log_langfuse_score(
+                name="findings_count",
+                value=len(final_findings),
+                comment=f"{repo}#{pr_number}",
+                handler=handler,
+            )
+            if handler:
+                update_langfuse_trace(
+                    tags=tags + [f"verdict:{v.recommendation}"],
+                    metadata={
+                        "verdict_score": v.overall_score,
+                        "findings_count": len(final_findings),
+                        "recommendation": v.recommendation,
+                    },
+                    trace_name=trace_name,
+                    handler=handler,
+                )
 
         logger.info("=" * 60)
 
@@ -309,10 +358,23 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
 def _test_offline(graph) -> None:
     """Non-interactive test that the graph compiles and runs up to interrupt."""
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler()
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    handler = get_langfuse_handler(
+        trace_name="opencodereview/smoke-test",
+        tags=["cli", "smoke", "demo-org/demo-repo"],
+        session_id=thread_id,
+        metadata={"prompt_versions": prompt_versions},
+    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
-        source="cli", repo="demo-org/demo-repo", pr_number=1, session_id=thread_id,
+        source="cli", repo="demo-org/demo-repo", pr_number=1,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
     )
     config: dict = {
         "configurable": {"thread_id": f"smoke-{thread_id}"},

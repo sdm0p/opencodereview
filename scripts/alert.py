@@ -89,7 +89,11 @@ def _run_smoke_test() -> dict[str, Any]:
     db_path = str(_project_root / "alert_checkpoints.db")
     graph = build_graph(db_path)
     thread_id = str(uuid.uuid4())
-    handler = get_langfuse_handler()
+    handler = get_langfuse_handler(
+        trace_name="opencodereview/alert-check",
+        tags=["cli", "alert", "demo-org/demo-repo"],
+        session_id=thread_id,
+    )
     cost_tracker = TokenCostCallback()
     metadata = build_run_metadata(
         source="cli", repo="demo-org/demo-repo",

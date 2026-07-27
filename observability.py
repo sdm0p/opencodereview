@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -93,8 +94,27 @@ def disable_langsmith() -> None:
 # ─── Langfuse (explicit callback) ──────────────────────────────────────────
 
 
-def get_langfuse_handler():
+def get_langfuse_handler(
+    trace_name: str = "opencodereview",
+    tags: Optional[list[str]] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
+):
     """Return a Langfuse ``CallbackHandler`` if keys are configured, else None.
+
+    Parameters
+    ----------
+    trace_name : str
+        Name for the trace in Langfuse (e.g. ``"opencodereview/review/psf/requests#42"``).
+    tags : list[str] or None
+        Tags attached to the trace for filtering in the Langfuse UI.
+    user_id : str or None
+        User identifier associated with the trace.
+    session_id : str or None
+        Session identifier for grouping related traces.
+    metadata : dict or None
+        Additional metadata to attach to the trace.
 
     Reads ``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, and optionally
     ``LANGFUSE_HOST`` from environment variables.  In langfuse v4+ the
@@ -124,7 +144,13 @@ def get_langfuse_handler():
         Langfuse(
             additional_headers={"x-langfuse-ingestion-version": "4"},
         )
-        return CallbackHandler()
+        return CallbackHandler(
+            trace_name=trace_name,
+            tags=tags or [],
+            user_id=user_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
     except ImportError:
         logger.warning(
             "langfuse not available — skipping tracing",
@@ -341,7 +367,12 @@ def check_langfuse_connectivity() -> tuple[bool, str]:
 
 
 class TokenCostCallback:
-    """Accumulates per-model token usage from LangChain LLM calls.
+    """Accumulates per-model token usage & TTFT from LangChain LLM calls.
+
+    Also tracks **TTFT** (Time to First Token) by recording a timestamp
+    at ``on_chat_model_start`` and computing elapsed time at ``on_llm_end``.
+    For non-streaming LLM calls this is effectively the full request duration;
+    for streaming it would be the time to the first chunk.
 
     Lazily imports ``BaseCallbackHandler`` so that ``observability.py`` can
     be imported even when ``langchain-core`` has version incompatibilities
@@ -368,6 +399,7 @@ class TokenCostCallback:
 
     def __init__(self) -> None:
         self.usage: list[dict[str, Any]] = []
+        self._start_times: dict[str, float] = {}  # run_id -> timestamp
 
     @property
     def total_input_tokens(self) -> int:
@@ -381,6 +413,20 @@ class TokenCostCallback:
     def total_cost(self) -> float:
         return sum(u.get("cost", 0.0) for u in self.usage)
 
+    @property
+    def total_ttft(self) -> float:
+        """Total TTFT across all LLM calls, in seconds."""
+        ttfts = [u.get("ttft_seconds", 0.0) for u in self.usage if u.get("ttft_seconds") is not None]
+        return sum(ttfts)
+
+    @property
+    def avg_ttft(self) -> Optional[float]:
+        """Average TTFT across all LLM calls, in seconds (None if no calls)."""
+        ttfts = [u.get("ttft_seconds", 0.0) for u in self.usage if u.get("ttft_seconds") is not None]
+        if not ttfts:
+            return None
+        return sum(ttfts) / len(ttfts)
+
     def on_chain_start(self, *args, **kwargs) -> None:
         pass
 
@@ -388,13 +434,22 @@ class TokenCostCallback:
         pass
 
     def on_chat_model_start(self, *args, **kwargs) -> None:
-        pass
+        """Record start timestamp for TTFT measurement.
+
+        ``**kwargs`` contains ``run_id`` which we use as the key.
+        """
+        run_id = kwargs.get("run_id")
+        if run_id:
+            self._start_times[str(run_id)] = time.time()
 
     def on_llm_start(self, *args, **kwargs) -> None:
-        pass
+        """Fallback: record start timestamp if ``on_chat_model_start`` wasn't called."""
+        run_id = kwargs.get("run_id")
+        if run_id and str(run_id) not in self._start_times:
+            self._start_times[str(run_id)] = time.time()
 
     def on_llm_error(self, error, **kwargs) -> None:
-        pass
+        self._cleanup_run(kwargs.get("run_id"))
 
     def on_chain_error(self, error, **kwargs) -> None:
         pass
@@ -408,10 +463,18 @@ class TokenCostCallback:
     def on_llm_end(self, response, **kwargs) -> None:
         """LangChain callback — called after each LLM invocation.
 
+        Computes TTFT from the recorded start time and captures token usage.
         ``**kwargs`` absorbs ``run_id``, ``parent_run_id``, and other
         metadata that LangChain passes to callback handlers.
         """
         try:
+            run_key = str(kwargs.get("run_id", ""))
+
+            # Compute TTFT (time from start to first token / completion)
+            ttft: Optional[float] = None
+            if run_key in self._start_times:
+                ttft = round(time.time() - self._start_times.pop(run_key), 3)
+
             usage = response.llm_output or {}
             token_usage = usage.get("token_usage", {}) or {}
             model = usage.get("model_name", "") or ""
@@ -421,31 +484,172 @@ class TokenCostCallback:
 
             if input_tokens > 0 or output_tokens > 0:
                 cost = estimate_groq_cost(model, input_tokens, output_tokens)
-                self.usage.append({
+                entry: dict[str, Any] = {
                     "model": model,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cost": cost,
-                })
+                }
+                if ttft is not None:
+                    entry["ttft_seconds"] = ttft
+                self.usage.append(entry)
+            else:
+                self._cleanup_run(run_key)
         except Exception:
+            self._cleanup_run(run_key)
             pass  # Best-effort — don't let cost tracking crash the run
 
+    def _cleanup_run(self, run_id: Any) -> None:
+        """Remove a run_id from the start times map (cleanup on error)."""
+        if run_id:
+            self._start_times.pop(str(run_id), None)
+
     def summary(self) -> str:
-        """Return a human-readable cost summary."""
+        """Return a human-readable cost & TTFT summary."""
         calls = len(self.usage)
         if calls == 0:
             return "Cost: N/A (no LLM calls captured)"
-        return (
-            f"Cost: {format_cost(self.total_cost)}"
-            f" · {calls} LLM call(s)"
-            f" · {self.total_input_tokens:,} in / {self.total_output_tokens:,} out tokens"
-        )
+
+        parts = [
+            f"Cost: {format_cost(self.total_cost)}",
+            f"{calls} LLM call(s)",
+            f"{self.total_input_tokens:,} in / {self.total_output_tokens:,} out tokens",
+        ]
+
+        avg = self.avg_ttft
+        if avg is not None:
+            parts.append(f"TTFT: {self.total_ttft:.1f}s total / {avg:.2f}s avg")
+
+        return " · ".join(parts)
 
     def reset(self) -> None:
         self.usage.clear()
+        self._start_times.clear()
 
 
 # ─── Error event logging ─────────────────────────────────────────────────--
+
+
+# ─── Score logging ──────────────────────────────────────────────────────────
+
+
+def log_langfuse_score(
+    name: str,
+    value: float,
+    comment: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    handler: Optional[Any] = None,
+) -> None:
+    """Log a numeric score to Langfuse, linked to a specific trace.
+
+    Requires Langfuse to be enabled (keys in environment).  The score is
+    associated with a trace by ``trace_id``.  If ``handler`` is provided
+    (a Langfuse ``CallbackHandler``) and ``trace_id`` is not explicitly
+    set, the function will extract the trace ID from the handler's
+    ``.trace_id`` attribute — this ensures the score appears directly
+    on the trace in the Langfuse UI rather than as a standalone score.
+
+    Parameters
+    ----------
+    name : str
+        Score name (e.g. ``"verdict_score"``, ``"findings_count"``).
+    value : float
+        Numeric score value.
+    comment : str or None
+        Optional human-readable comment.
+    trace_id : str or None
+        Explicit trace ID.  If ``None`` but ``handler`` is provided,
+        the handler's ``.trace_id`` is used.
+    handler : Langfuse CallbackHandler or None
+        Langfuse ``CallbackHandler`` from which to extract the trace ID
+        after the graph run completes.
+    """
+    if not is_langfuse_enabled():
+        return
+
+    # Auto-extract trace_id from handler if not explicitly provided
+    resolved_trace_id = trace_id
+    if resolved_trace_id is None and handler is not None:
+        try:
+            resolved_trace_id = getattr(handler, "trace_id", None)
+        except Exception:
+            pass
+
+    try:
+        from langfuse import Langfuse
+
+        lf = Langfuse()
+        kwargs: dict[str, Any] = {
+            "name": name,
+            "value": value,
+        }
+        if resolved_trace_id:
+            kwargs["trace_id"] = resolved_trace_id
+        if comment:
+            kwargs["comment"] = comment
+
+        lf.score(**kwargs)
+        lf.flush()
+    except Exception as exc:
+        logger.debug("Failed to log Langfuse score: %s", exc)
+
+
+def update_langfuse_trace(
+    trace_name: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
+    handler: Optional[Any] = None,
+) -> None:
+    """Update an existing Langfuse trace with name, tags, or metadata.
+
+    This is useful for enriching a trace after the fact (e.g., after
+    the graph completes and we know the final verdict).
+
+    Parameters
+    ----------
+    trace_name : str or None
+        New name for the trace.
+    tags : list[str] or None
+        Tags to add to the trace (replaces existing tags).
+    metadata : dict or None
+        Metadata to merge into the trace.
+    trace_id : str or None
+        Explicit trace ID.  If ``None`` but ``handler`` is provided,
+        the handler's ``.trace_id`` is used.
+    handler : Langfuse CallbackHandler or None
+        Langfuse ``CallbackHandler`` from which to extract the trace ID.
+    """
+    if not is_langfuse_enabled():
+        return
+
+    # Auto-extract trace_id from handler if not explicitly provided
+    resolved_trace_id = trace_id
+    if resolved_trace_id is None and handler is not None:
+        try:
+            resolved_trace_id = getattr(handler, "trace_id", None)
+        except Exception:
+            pass
+
+    try:
+        from langfuse import Langfuse
+
+        lf = Langfuse()
+        kwargs: dict[str, Any] = {}
+        if trace_name is not None:
+            kwargs["name"] = trace_name
+        if tags is not None:
+            kwargs["tags"] = tags
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        if resolved_trace_id:
+            kwargs["trace_id"] = resolved_trace_id
+
+        if kwargs:
+            lf.update_trace(**kwargs)
+            lf.flush()
+    except Exception as exc:
+        logger.debug("Failed to update Langfuse trace: %s", exc)
 
 
 def log_error_to_backends(

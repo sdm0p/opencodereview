@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
@@ -263,6 +264,39 @@ def _get_or_build_collection(
     )
 
 
+def _fetch_and_chunk_file(
+    fp: str, owner: str, repo_name: str, head_sha: str,
+) -> list[dict]:
+    """Fetch a single source file from GitHub and return its chunks.
+
+    Called by :class:`ThreadPoolExecutor` workers to parallelise the
+    I/O-bound file-fetching phase of vector-store construction.
+    Returns an empty list on any error (404, timeout, etc.)
+    """
+    raw_url = f"{RAW_CONTENT_BASE}/{owner}/{repo_name}/{head_sha}/{fp}"
+    try:
+        resp = requests.get(raw_url, timeout=30)
+        if resp.status_code != 200:
+            return []
+        content = resp.text
+    except requests.RequestException:
+        return []
+
+    chunks = _chunk_source(fp, content)
+    result: list[dict] = []
+    for chunk in chunks:
+        result.append({
+            "text": chunk["text"],
+            "meta": {
+                "source": "codebase",
+                "file_path": fp,
+                "chunk_type": chunk["type"],
+            },
+            "id": str(uuid.uuid4()),
+        })
+    return result
+
+
 def _build_vector_store(
     owner: str, repo_name: str,
     head_sha: str,
@@ -310,31 +344,36 @@ def _build_vector_store(
             and _should_include(item["path"])
             and item["path"] not in exclude_paths
         ]
-        logger.info("Source files to embed (excl. changed): %d", len(source_paths))
+        logger.info(
+            "Source files to embed (excl. changed): %d — fetching in parallel …",
+            len(source_paths),
+        )
 
         code_docs: list[str] = []
         code_metadatas: list[dict] = []
         code_ids: list[str] = []
 
-        for fp in source_paths:
-            raw_url = f"{RAW_CONTENT_BASE}/{owner}/{repo_name}/{head_sha}/{fp}"
-            try:
-                resp = requests.get(raw_url, timeout=30)
-                if resp.status_code != 200:
+        # Fetch files concurrently — I/O-bound network requests benefit
+        # greatly from thread-level parallelism.
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {
+                pool.submit(
+                    _fetch_and_chunk_file, fp, owner, repo_name, head_sha
+                ): fp
+                for fp in source_paths
+            }
+            for future in as_completed(futures):
+                fp = futures[future]
+                try:
+                    file_result = future.result()
+                except Exception as exc:
+                    logger.debug("Failed to fetch %s: %s", fp, exc)
                     continue
-                content = resp.text
-            except requests.RequestException:
-                continue
 
-            file_chunks = _chunk_source(fp, content)
-            for chunk in file_chunks:
-                code_docs.append(chunk["text"])
-                code_metadatas.append({
-                    "source": "codebase",
-                    "file_path": fp,
-                    "chunk_type": chunk["type"],
-                })
-                code_ids.append(str(uuid.uuid4()))
+                for chunk in file_result:
+                    code_docs.append(chunk["text"])
+                    code_metadatas.append(chunk["meta"])
+                    code_ids.append(chunk["id"])
 
         if code_docs:
             collection.add(
