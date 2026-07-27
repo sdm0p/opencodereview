@@ -34,7 +34,6 @@ from observability import (
     langfuse_trace,
     log_error_to_backends,
     log_langfuse_score,
-    update_langfuse_trace,
     TokenCostCallback,
 )
 from state import ChangedFile, ContextChunk, Finding, Severity, Verdict
@@ -300,17 +299,6 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                     comment=f"{repo}#{pr_number}",
                     handler=handler,
                 )
-                if handler:
-                    update_langfuse_trace(
-                        tags=tags + [f"verdict:{v.recommendation}"],
-                        metadata={
-                            "verdict_score": v.overall_score,
-                            "findings_count": len(final_findings),
-                            "recommendation": v.recommendation,
-                        },
-                        trace_name=trace_name,
-                        handler=handler,
-                    )
 
             logger.info("=" * 60)
 

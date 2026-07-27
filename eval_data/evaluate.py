@@ -559,7 +559,6 @@ def _log_to_observability(results: list[dict], dataset_name: str = "opencoderevi
     This function is called only when ``--log-to-observability`` is passed.
     """
     from observability import (
-        get_langfuse_handler,
         is_langfuse_enabled,
         is_langsmith_enabled,
     )
@@ -613,39 +612,40 @@ def _log_to_observability(results: list[dict], dataset_name: str = "opencoderevi
 
             # Log per-PR scores
             for r in results:
-                lf.score(
+                lf.create_score(
                     name=f"{dataset_name}/{r.get('id', 'unknown')}/f1",
                     value=r["f1"],
                     comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}"
-                            f" — P={r['precision']:.3f} R={r['recall']:.3f}",
+                             f" — P={r['precision']:.3f} R={r['recall']:.3f}",
                 )
                 # Log per-PR RAGAS scores (context_precision, context_recall,
                 # faithfulness, answer_relevancy, mmr)
                 for ragas_key in ("context_precision", "context_recall",
                                   "faithfulness", "answer_relevancy", "mmr"):
                     if ragas_key in r:
-                        lf.score(
+                        lf.create_score(
                             name=f"{dataset_name}/{r.get('id', 'unknown')}/{ragas_key}",
                             value=r[ragas_key],
                             comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}",
                         )
 
             # Log aggregate scores
-            lf.score(name=f"{dataset_name}/micro_f1", value=micro_f)
-            lf.score(name=f"{dataset_name}/micro_precision", value=micro_p)
-            lf.score(name=f"{dataset_name}/micro_recall", value=micro_r)
-            lf.score(name=f"{dataset_name}/pr_count", value=len(results))
+            lf.create_score(name=f"{dataset_name}/micro_f1", value=micro_f)
+            lf.create_score(name=f"{dataset_name}/micro_precision", value=micro_p)
+            lf.create_score(name=f"{dataset_name}/micro_recall", value=micro_r)
+            lf.create_score(name=f"{dataset_name}/pr_count", value=len(results))
 
             # Log aggregate RAGAS scores (all available metrics)
             if has_ragas:
                 for metric, avg in ragas_avgs.items():
-                    lf.score(
+                    lf.create_score(
                         name=f"{dataset_name}/{metric}",
                         value=avg,
                     )
 
-            # Flush to ensure scores are sent before process exits
+            # Flush and shutdown to ensure scores are sent before process exits
             lf.flush()
+            lf.shutdown()
             logger.info("Langfuse scores logged (run=%s)", run_name)
         except Exception as exc:
             logger.warning("Failed to log to Langfuse: %s", exc)

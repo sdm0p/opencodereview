@@ -647,7 +647,7 @@ def log_langfuse_score(
         if comment:
             kwargs["comment"] = comment
 
-        lf.score(**kwargs)
+        lf.create_score(**kwargs)
         lf.flush()
     except Exception as exc:
         logger.debug("Failed to log Langfuse score: %s", exc)
@@ -660,48 +660,23 @@ def update_langfuse_trace(
     trace_id: Optional[str] = None,
     handler: Optional[Any] = None,
 ) -> None:
-    """Update an existing Langfuse trace with name, tags, or metadata.
+    """No-op in langfuse v4+ — trace attributes must be set upfront
+    via ``propagate_attributes()`` (see :func:`langfuse_trace`).
 
-    This is useful for enriching a trace after the fact (e.g., after
-    the graph completes and we know the final verdict).
-
-    Parameters
-    ----------
-    trace_name : str or None
-        New name for the trace.
-    tags : list[str] or None
-        Tags to add to the trace (replaces existing tags).
-    metadata : dict or None
-        Metadata to merge into the trace.
-    trace_id : str or None
-        Explicit trace ID.  If ``None``, attempts to resolve via handler.
-    handler : Langfuse CallbackHandler or None
-        Langfuse ``CallbackHandler`` from which to extract the trace ID.
+    In langfuse v4 the trace API no longer supports ``update_trace``.
+    Trace-level metadata (name, tags, user_id, session_id, metadata)
+    must be provided at trace creation time via ``propagate_attributes``.
+    Use :func:`log_langfuse_score` instead for post-hoc annotations
+    like verdict score or findings count.
     """
-    if not is_langfuse_enabled():
-        return
-
-    resolved_trace_id = trace_id or _resolve_langfuse_trace_id(handler)
-
-    try:
-        from langfuse import Langfuse
-
-        lf = Langfuse()
-        kwargs: dict[str, Any] = {}
-        if trace_name is not None:
-            kwargs["name"] = trace_name
-        if tags is not None:
-            kwargs["tags"] = tags
-        if metadata is not None:
-            kwargs["metadata"] = metadata
-        if resolved_trace_id:
-            kwargs["trace_id"] = resolved_trace_id
-
-        if kwargs:
-            lf.update_trace(**kwargs)
-            lf.flush()
-    except Exception as exc:
-        logger.debug("Failed to update Langfuse trace: %s", exc)
+    if resolved_trace_id := (trace_id or _resolve_langfuse_trace_id(handler)):
+        logger.debug(
+            "update_langfuse_trace is a no-op in langfuse v4 (trace=%s). "
+            "Set attributes upfront via langfuse_trace() instead.",
+            resolved_trace_id,
+        )
+    # Dedicated score logging is handled by log_langfuse_score() — nothing
+    # to do here.
 
 
 def log_error_to_backends(
