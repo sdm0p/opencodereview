@@ -51,6 +51,7 @@ from langgraph.types import Command
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph import build_graph
+from observability import langfuse_trace, _resolve_langfuse_trace_id
 from state import ChangedFile, Finding
 
 logger = logging.getLogger(__name__)
@@ -177,12 +178,14 @@ def _fuzzy_match(
 
 def _run_graph_for_pr(
     entry: dict, graph,
-) -> tuple[list[Finding], Optional[dict], list]:
+) -> tuple[list[Finding], Optional[dict], list, Optional[str]]:
     """Run the full OpenCodeReview graph on a single PR.
 
-    Returns ``(final_findings, verdict_dict_or_None, context_chunks)``.
+    Returns ``(final_findings, verdict_dict_or_None, context_chunks, trace_id_or_None)``.
     """
     thread_id = str(uuid.uuid4())
+    repo = entry.get("repo", "?")
+    pr_number = entry.get("pr_number", 0)
     config = {"configurable": {"thread_id": f"eval-{thread_id}"}}
 
     # Build initial state from pre-fetched data to avoid API calls
@@ -196,43 +199,62 @@ def _run_graph_for_pr(
         "changed_files": changed_files,
     }
 
-    # Run -- the graph will pause at human_approval (interrupt)
-    try:
-        list(graph.stream(initial_state, config))
-    except Exception as exc:
-        logger.warning("  Graph stream error: %s", exc)
+    trace_id: Optional[str] = None
+    context_chunks: list = []
 
-    state = graph.get_state(config)
-    tasks = state.tasks
-    values = state.values
+    with langfuse_trace(
+        trace_name=f"opencodereview/eval/{repo}#{pr_number}",
+        tags=["eval", repo],
+        session_id=thread_id,
+    ) as handler:
+        callbacks = []
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
 
-    context_chunks = values.get("context_chunks", [])
+        # Run -- the graph will pause at human_approval (interrupt)
+        try:
+            list(graph.stream(initial_state, config))
+        except Exception as exc:
+            logger.warning("  Graph stream error: %s", exc)
 
-    if not tasks:
-        # Graph completed without interrupt -- no findings to review
+        state = graph.get_state(config)
+        tasks = state.tasks
+        values = state.values
+
+        context_chunks = values.get("context_chunks", [])
+
+        if not tasks:
+            # Graph completed without interrupt -- no findings to review
+            trace_id = _resolve_langfuse_trace_id(handler)
+            return (
+                values.get("final_findings", []),
+                values.get("verdict"),
+                context_chunks,
+                trace_id,
+            )
+
+        # Auto-approve to continue through the executor
+        try:
+            graph.invoke(Command(resume={"action": "approve"}), config)
+        except Exception as exc:
+            logger.warning("  Resume error: %s", exc)
+            trace_id = _resolve_langfuse_trace_id(handler)
+            return (
+                values.get("final_findings", []),
+                values.get("verdict"),
+                context_chunks,
+                trace_id,
+            )
+
+        final_state = graph.get_state(config)
+        trace_id = _resolve_langfuse_trace_id(handler)
         return (
-            values.get("final_findings", []),
-            values.get("verdict"),
-            context_chunks,
+            final_state.values.get("final_findings", []),
+            final_state.values.get("verdict"),
+            final_state.values.get("context_chunks", []),
+            trace_id,
         )
-
-    # Auto-approve to continue through the executor
-    try:
-        graph.invoke(Command(resume={"action": "approve"}), config)
-    except Exception as exc:
-        logger.warning("  Resume error: %s", exc)
-        return (
-            values.get("final_findings", []),
-            values.get("verdict"),
-            context_chunks,
-        )
-
-    final_state = graph.get_state(config)
-    return (
-        final_state.values.get("final_findings", []),
-        final_state.values.get("verdict"),
-        final_state.values.get("context_chunks", []),
-    )
 
 
 # --- Metrics -----------------------------------------------------------------
@@ -436,7 +458,7 @@ def main() -> None:
         )
 
         try:
-            findings, verdict, context_chunks = _run_graph_for_pr(entry, graph)
+            findings, verdict, context_chunks, trace_id = _run_graph_for_pr(entry, graph)
         except Exception as exc:
             print(f"ERROR: {exc}")
             continue
@@ -450,6 +472,7 @@ def main() -> None:
             "repo": entry["repo"],
             "pr_number": entry["pr_number"],
             "title": entry.get("title", ""),
+            "trace_id": trace_id,
         })
 
         # ── Compute RAGAS retrieval & generation metrics (optional) ──
@@ -546,15 +569,13 @@ def _print_verbose(entry: dict, findings: list[Finding], metrics: dict, use_keyw
 # ─── Quality-over-time: log to observability ───────────────────────────────
 
 
-def _log_to_observability(results: list[dict], dataset_name: str = "opencodereview-eval") -> None:
+def _log_to_observability(results: list[dict]) -> None:
     """Log evaluation results to the active observability backend(s).
 
-    This creates a trace/run for the eval run with results as metadata,
-    so quality trends are visible in LangSmith / Langfuse dashboards.
-
-    For LangSmith: creates a dataset with the results (no separate SDK needed
-    — LangChain auto-traces the graph runs).
-    For Langfuse: creates a score for each metric via the Score API.
+    Per-PR scores (f1, context_precision, etc.) are linked to each PR's
+    pipeline trace via ``trace_id``, so they appear directly on the trace
+    in the Langfuse UI.  Aggregate scores (micro_f1, pr_count, etc.) are
+    logged without a trace since they summarise multiple runs.
 
     This function is called only when ``--log-to-observability`` is passed.
     """
@@ -610,38 +631,46 @@ def _log_to_observability(results: list[dict], dataset_name: str = "opencoderevi
             lf = Langfuse()
             run_name = f"eval-{datetime.now():%Y%m%d-%H%M%S}"
 
-            # Log per-PR scores
+            # Log per-PR scores (linked to each PR's pipeline trace)
             for r in results:
+                pr_trace_id = r.get("trace_id")
+                pr_comment = f"{r.get('repo', '?')}#{r.get('pr_number', '?')}"
+                pr_metadata = {
+                    "pr_id": r.get("id"),
+                    "repo": r.get("repo"),
+                    "pr_number": r.get("pr_number"),
+                }
+
+                # Standard eval metrics
                 lf.create_score(
-                    name=f"{dataset_name}/{r.get('id', 'unknown')}/f1",
+                    name="f1",
                     value=r["f1"],
-                    comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}"
-                             f" — P={r['precision']:.3f} R={r['recall']:.3f}",
+                    trace_id=pr_trace_id,
+                    comment=pr_comment + f" — P={r['precision']:.3f} R={r['recall']:.3f}",
+                    metadata=pr_metadata,
                 )
-                # Log per-PR RAGAS scores (context_precision, context_recall,
-                # faithfulness, answer_relevancy, mmr)
+                # Per-PR RAGAS scores
                 for ragas_key in ("context_precision", "context_recall",
                                   "faithfulness", "answer_relevancy", "mmr"):
                     if ragas_key in r:
                         lf.create_score(
-                            name=f"{dataset_name}/{r.get('id', 'unknown')}/{ragas_key}",
+                            name=ragas_key,
                             value=r[ragas_key],
-                            comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}",
+                            trace_id=pr_trace_id,
+                            comment=pr_comment,
+                            metadata=pr_metadata,
                         )
 
-            # Log aggregate scores
-            lf.create_score(name=f"{dataset_name}/micro_f1", value=micro_f)
-            lf.create_score(name=f"{dataset_name}/micro_precision", value=micro_p)
-            lf.create_score(name=f"{dataset_name}/micro_recall", value=micro_r)
-            lf.create_score(name=f"{dataset_name}/pr_count", value=len(results))
+            # Log aggregate scores (no trace_id — spans multiple runs)
+            lf.create_score(name="micro_f1", value=micro_f)
+            lf.create_score(name="micro_precision", value=micro_p)
+            lf.create_score(name="micro_recall", value=micro_r)
+            lf.create_score(name="pr_count", value=len(results))
 
-            # Log aggregate RAGAS scores (all available metrics)
+            # Log aggregate RAGAS scores
             if has_ragas:
                 for metric, avg in ragas_avgs.items():
-                    lf.create_score(
-                        name=f"{dataset_name}/{metric}",
-                        value=avg,
-                    )
+                    lf.create_score(name=metric, value=avg)
 
             # Flush and shutdown to ensure scores are sent before process exits
             lf.flush()
