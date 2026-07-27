@@ -12,3 +12,5 @@ chromadb
 langsmith>=0.7
 langfuse
 requests-cache>=1.2
+ragas>=0.3
+litellm

@@ -177,10 +177,10 @@ def _fuzzy_match(
 
 def _run_graph_for_pr(
     entry: dict, graph,
-) -> tuple[list[Finding], Optional[dict]]:
+) -> tuple[list[Finding], Optional[dict], list]:
     """Run the full OpenCodeReview graph on a single PR.
 
-    Returns ``(final_findings, verdict_dict_or_None)``.
+    Returns ``(final_findings, verdict_dict_or_None, context_chunks)``.
     """
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": f"eval-{thread_id}"}}
@@ -206,21 +206,32 @@ def _run_graph_for_pr(
     tasks = state.tasks
     values = state.values
 
+    context_chunks = values.get("context_chunks", [])
+
     if not tasks:
         # Graph completed without interrupt -- no findings to review
-        return values.get("final_findings", []), values.get("verdict")
+        return (
+            values.get("final_findings", []),
+            values.get("verdict"),
+            context_chunks,
+        )
 
     # Auto-approve to continue through the executor
     try:
         graph.invoke(Command(resume={"action": "approve"}), config)
     except Exception as exc:
         logger.warning("  Resume error: %s", exc)
-        return values.get("final_findings", []), values.get("verdict")
+        return (
+            values.get("final_findings", []),
+            values.get("verdict"),
+            context_chunks,
+        )
 
     final_state = graph.get_state(config)
     return (
         final_state.values.get("final_findings", []),
         final_state.values.get("verdict"),
+        final_state.values.get("context_chunks", []),
     )
 
 
@@ -362,6 +373,11 @@ def main() -> None:
         "--log-to-observability", action="store_true",
         help="Log evaluation scores to LangSmith/Langfuse for quality-over-time tracking",
     )
+    parser.add_argument(
+        "--ragas", action="store_true",
+        help="Compute RAGAS retrieval & generation metrics (context_precision, context_recall, "
+             "faithfulness, answer_relevancy, mmr) in addition to standard precision/recall/F1",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -420,7 +436,7 @@ def main() -> None:
         )
 
         try:
-            findings, verdict = _run_graph_for_pr(entry, graph)
+            findings, verdict, context_chunks = _run_graph_for_pr(entry, graph)
         except Exception as exc:
             print(f"ERROR: {exc}")
             continue
@@ -435,6 +451,48 @@ def main() -> None:
             "pr_number": entry["pr_number"],
             "title": entry.get("title", ""),
         })
+
+        # ── Compute RAGAS retrieval & generation metrics (optional) ──
+        if args.ragas and context_chunks:
+            try:
+                from eval_data.ragas_eval import compute_ragas_retrieval_scores
+
+                query = entry.get("diff", "")[:8_000] or entry.get("title", "")
+                contexts = [c.content for c in context_chunks if c.content]
+                gt_text = " ".join(
+                    g.get("comment", "")
+                    for g in entry.get("ground_truth", [])[:5]
+                ) if entry.get("ground_truth") else None
+
+                # Build the generated answer text from findings + verdict
+                answer_lines = []
+                for f in findings:
+                    answer_lines.append(
+                        f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
+                    )
+                if verdict:
+                    answer_lines.append(
+                        f"Verdict: {verdict.recommendation} (score={verdict.overall_score}/10) — {verdict.summary}"
+                    )
+                answer_text = "\n".join(answer_lines) if answer_lines else None
+
+                ragas_scores = compute_ragas_retrieval_scores(
+                    query=query,
+                    retrieved_contexts=contexts,
+                    ground_truth=gt_text or None,
+                    answer=answer_text,
+                )
+                metrics.update(ragas_scores)
+                print(
+                    f"  RAGAS: "
+                    + " | ".join(
+                        f"{k}={v:.3f}"
+                        for k, v in ragas_scores.items()
+                    )
+                )
+            except Exception as exc:
+                logger.warning("RAGAS computation failed: %s", exc)
+
         results.append(metrics)
 
         print(
@@ -518,11 +576,31 @@ def _log_to_observability(results: list[dict], dataset_name: str = "opencoderevi
         else 0.0
     )
 
+    # RAGAS metric keys available
+    RAGAS_METRICS = [
+        "context_precision", "context_recall",
+        "faithfulness", "answer_relevancy", "mmr",
+    ]
+
+    # Check which RAGAS scores were computed
+    has_ragas = bool(results and any(k in results[0] for k in RAGAS_METRICS))
+    ragas_avgs: dict[str, float] = {}
+    if has_ragas:
+        for metric in RAGAS_METRICS:
+            values = [r.get(metric, 0.0) for r in results if metric in r]
+            ragas_avgs[metric] = sum(values) / len(values) if values else 0.0
+
+    log_parts = [f"micro F1={micro_f:.3f}"]
+    if has_ragas:
+        for metric, avg in ragas_avgs.items():
+            log_parts.append(f"RAGAS_{metric}={avg:.3f}")
+    log_parts.append(f"PRs={len(results)}")
+    log_parts.append(f"LangSmith={is_langsmith_enabled()}")
+    log_parts.append(f"Langfuse={is_langfuse_enabled()}")
+
     logger.info(
-        "Logging eval results to observability "
-        "(micro F1=%.3f, PRs=%d, LangSmith=%s, Langfuse=%s)",
-        micro_f, len(results),
-        is_langsmith_enabled(), is_langfuse_enabled(),
+        "Logging eval results to observability (%s)",
+        ", ".join(log_parts),
     )
 
     # ── Langfuse: create scores via SDK ──────────────────────────────────
@@ -541,12 +619,30 @@ def _log_to_observability(results: list[dict], dataset_name: str = "opencoderevi
                     comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}"
                             f" — P={r['precision']:.3f} R={r['recall']:.3f}",
                 )
+                # Log per-PR RAGAS scores (context_precision, context_recall,
+                # faithfulness, answer_relevancy, mmr)
+                for ragas_key in ("context_precision", "context_recall",
+                                  "faithfulness", "answer_relevancy", "mmr"):
+                    if ragas_key in r:
+                        lf.score(
+                            name=f"{dataset_name}/{r.get('id', 'unknown')}/{ragas_key}",
+                            value=r[ragas_key],
+                            comment=f"{r.get('repo', '?')}#{r.get('pr_number', '?')}",
+                        )
 
             # Log aggregate scores
             lf.score(name=f"{dataset_name}/micro_f1", value=micro_f)
             lf.score(name=f"{dataset_name}/micro_precision", value=micro_p)
             lf.score(name=f"{dataset_name}/micro_recall", value=micro_r)
             lf.score(name=f"{dataset_name}/pr_count", value=len(results))
+
+            # Log aggregate RAGAS scores (all available metrics)
+            if has_ragas:
+                for metric, avg in ragas_avgs.items():
+                    lf.score(
+                        name=f"{dataset_name}/{metric}",
+                        value=avg,
+                    )
 
             # Flush to ensure scores are sent before process exits
             lf.flush()
