@@ -154,6 +154,7 @@ def ingestion_node(state: OpenCodeReviewState) -> dict:
     pr_data = pr_resp.json()
     head_sha = pr_data["head"]["sha"]
     head_ref = pr_data["head"]["ref"]
+    base_sha = pr_data["base"]["sha"]
     base_ref = pr_data["base"]["ref"]
 
     logger.info(
@@ -215,6 +216,7 @@ def ingestion_node(state: OpenCodeReviewState) -> dict:
     return {
         "diff": diff_text,
         "changed_files": changed_files,
+        "base_sha": base_sha,
     }
 
 

@@ -65,6 +65,7 @@ class OpenCodeReviewState(BaseModel):
     # PR metadata: set-once, single values
     repo: str = ""
     pr_number: int = 0
+    base_sha: str = ""  # SHA of the base branch (used as vector-store cache key)
     diff: Optional[str] = None
     changed_files: list[ChangedFile] = Field(default_factory=list)
 

@@ -423,11 +423,10 @@ def retrieval_node(state: OpenCodeReviewState) -> dict:
     changed_paths: set[str] = {f.path for f in state.changed_files}
 
     # -- Build (or load) the vector store for this repo -----------------------
-    # Use head_sha from the diff structure — we don't have it directly, so we
-    # parse the first line of the diff for the repo context.
-    # For the vector store, we use a placeholder ref — the store is rebuilt
-    # each session anyway.
-    head_sha_for_tree = "HEAD"  # GitHub resolves this to the default branch
+    # Use the base branch SHA as the cache key.  When re-reviewing the same
+    # repo against the same base SHA the vector store is returned immediately
+    # without re-fetching / re-embedding any files.
+    base_sha = state.base_sha or "HEAD"  # fallback for synthetic / test state
 
     if chromadb is None:
         logger.warning("chromadb not available — returning empty context")
@@ -435,7 +434,7 @@ def retrieval_node(state: OpenCodeReviewState) -> dict:
 
     try:
         collection = _get_or_build_collection(
-            owner, repo_name, head_sha_for_tree, changed_paths,
+            owner, repo_name, base_sha, changed_paths,
         )
     except Exception as exc:
         logger.warning("Failed to build/get vector store: %s", exc)
