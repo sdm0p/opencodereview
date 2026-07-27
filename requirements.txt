@@ -11,3 +11,4 @@ langchain
 chromadb
 langsmith>=0.7
 langfuse
+requests-cache>=1.2

@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Shared GitHub API client with automatic token resolution and 401 resilience.
 
+Caching
+-------
+All HTTP requests made through ``requests`` within this process are cached
+to a local SQLite backend with a 15-minute TTL, so re-reviewing the same PR
+does not re-fetch data from GitHub.
+
 Usage
 -----
     from github_client import GitHubSession, resolve_token, guard_401
@@ -28,6 +34,43 @@ import requests
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "opencodereview"
+
+# ─── Global HTTP cache ─────────────────────────────────────────────────────────
+# Cache all requests (GitHub API + raw content) to a local SQLite store
+# so re-reviewing the same PR avoids redundant network fetches.
+_CACHE_BACKEND = None
+
+
+def _init_cache() -> None:
+    """Install ``requests-cache`` with a 15-minute TTL.
+
+    Patches ``requests.Session`` globally, so :class:`GitHubSession`
+    (which inherits from it) automatically gets caching.  Safe to call
+    multiple times — subsequent calls are no-ops.
+    """
+    global _CACHE_BACKEND
+    if _CACHE_BACKEND is not None:
+        return
+    try:
+        import requests_cache
+
+        cache_dir = os.environ.get(
+            "OPENCODEREVIEW_CACHE_DIR",
+            os.path.join(os.getcwd(), ".opencodereview"),
+        )
+        os.makedirs(cache_dir, exist_ok=True)
+        db_path = os.path.join(cache_dir, "http_cache.sqlite")
+        _CACHE_BACKEND = requests_cache.install_cache(
+            cache_name=db_path,
+            backend="sqlite",
+            expire_after=900,  # 15 minutes
+            allowable_codes=(200, 404),
+        )
+        logger.debug("HTTP cache initialised at %s", db_path)
+    except ImportError:
+        logger.debug("requests-cache not installed — skipping HTTP cache")
+    except Exception as exc:
+        logger.warning("Failed to initialise HTTP cache: %s", exc)
 
 
 # ─── Exceptions ──────────────────────────────────────────────────────────────

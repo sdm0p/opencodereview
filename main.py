@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 import uuid
 
 import click
@@ -43,15 +44,27 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "checkpoints.db"
 
+NODE_LABELS: dict[str, str] = {
+    "ingestion": "📥 Ingestion",
+    "retrieval": "🔍 Retrieval",
+    "correctness_review": "✅ Correctness Review",
+    "security_review": "🔒 Security Review",
+    "test_coverage_review": "🧪 Test Coverage Review",
+    "aggregator": "📊 Aggregation",
+}
+
 
 # ─── Observability initialisation ──────────────────────────────────────────
 
 
 def _init_observability() -> None:
-    """Initialise tracing backends from env vars / keyring.
+    """Initialise tracing backends and HTTP cache from env vars / keyring.
 
     Called once at the start of each ``review`` command.
     """
+    from github_client import _init_cache as _init_http_cache
+    _init_http_cache()
+
     import keyring as _kr
     from config import SERVICE_NAME as _svc
 
@@ -215,7 +228,12 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
             "pr_number": pr_number,
         }
 
-    events = list(graph.stream(initial_state, config))
+    t0 = time.time()
+    for event in graph.stream(initial_state, config):
+        for node_name in event:
+            label = NODE_LABELS.get(node_name, node_name)
+            logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+    logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
 
     state = graph.get_state(config)
     tasks = state.tasks
@@ -305,7 +323,12 @@ def _test_offline(graph) -> None:
         callbacks.append(handler)
     config["callbacks"] = callbacks
 
-    list(graph.stream(SYNTHETIC_STATE, config))
+    t0 = time.time()
+    for event in graph.stream(SYNTHETIC_STATE, config):
+        for node_name in event:
+            label = NODE_LABELS.get(node_name, node_name)
+            logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+    logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
     state = graph.get_state(config)
     tasks = state.tasks
     values = state.values
@@ -313,17 +336,17 @@ def _test_offline(graph) -> None:
     verdict = values.get("verdict")
     final_findings = values.get("final_findings", [])
 
-    print(f"Smoke test: paused=True, tasks={len(tasks)}, "
-          f"findings={len(final_findings)}, "
-          f"verdict={verdict.recommendation if verdict else 'None'}")
-    print(cost_tracker.summary())
+    logger.info("Smoke test: paused=True, tasks=%d, findings=%d, verdict=%s",
+                len(tasks), len(final_findings),
+                verdict.recommendation if verdict else 'None')
+    logger.info("%s", cost_tracker.summary())
 
     assert len(tasks) > 0, "Graph did not pause at interrupt"
     assert verdict is not None, "No verdict produced"
     assert len(final_findings) >= 0, "Missing final_findings"
 
     graph.invoke(Command(resume={"action": "reject"}), config)
-    print("Smoke test: resume OK, graph completed")
+    logger.info("Smoke test: resume OK, graph completed")
 
 
 def _cleanup_db() -> None:

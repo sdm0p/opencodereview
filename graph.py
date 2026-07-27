@@ -22,8 +22,13 @@ from state import OpenCodeReviewState
 logger = logging.getLogger(__name__)
 
 
-def build_graph(db_path: str = "checkpoints.db") -> StateGraph:
+def build_graph(db_path: str | None = None) -> StateGraph:
     """Build and compile the OpenCodeReview graph with SqliteSaver checkpointing.
+
+    When *db_path* is ``None`` an in-memory SQLite database is used so file
+    I/O is avoided — ideal for ephemeral CLI runs.  Pass a file path to keep
+    checkpoints across process restarts (needed by the Gradio UI which may
+    resume after page reload).
 
     Topology:
 
@@ -92,7 +97,8 @@ def build_graph(db_path: str = "checkpoints.db") -> StateGraph:
         ("state", "Verdict"),
     ])
 
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    resolved_path: str = db_path if db_path is not None else ":memory:"
+    conn = sqlite3.connect(resolved_path, check_same_thread=False)
     saver = SqliteSaver(conn, serde=serde)
 
     return builder.compile(checkpointer=saver)

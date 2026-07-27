@@ -23,6 +23,10 @@ MIN_CONFIDENCE = 0.25
 # Files/line pairs within this many lines are considered duplicates
 LINE_TOLERANCE = 5
 
+# Default to rule-based aggregation (skips expensive LLM critic call).
+# Set AGGREGATOR_USE_LLM_CRITIC=true in env to re-enable the LLM pass.
+USE_LLM_CRITIC = os.environ.get("AGGREGATOR_USE_LLM_CRITIC", "").lower() in ("1", "true", "yes")
+
 
 # ─── Load prompt from file ──────────────────────────────────────────────────
 
@@ -207,8 +211,8 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
 
     Two-phase approach:
       1. Pre-LLM heuristic deduplication (groups by file/line proximity).
-      2. LLM noise-filter + verdict (if GROQ_API_KEY is available), else
-         rule-based fallback.
+      2. Rule-based verdict by default (fast, ~10ms), or optional LLM critic
+         when ``USE_LLM_CRITIC`` is enabled.
     """
     raw_findings = state.findings
     if not raw_findings:
@@ -230,44 +234,43 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
         len(raw_findings), len(deduped),
     )
 
-    # -- Phase 2: LLM critic or rule-based fallback --------------------------
-    try:
-        llm = create_llm()
-    except ValueError:
-        llm = None
-
-    if llm is not None:
-        logger.info(
-            "Invoking aggregator LLM critic (prompt_version=%s) …",
-            PROMPT_VERSION,
-        )
+    # -- Phase 2: Rule-based (default, fast) or LLM critic (opt-in) ----------
+    if USE_LLM_CRITIC:
         try:
-            structured_llm = llm.with_structured_output(AggregatedReview)
+            llm = create_llm()
+        except ValueError:
+            llm = None
 
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_prompt(deduped)},
-            ]
-            result: AggregatedReview = structured_llm.invoke(messages)  # type: ignore[assignment]
-        except Exception as exc:
-            logger.warning("Aggregator LLM call failed — falling back to rule-based: %s", exc)
-            result = None
-
-        if result is not None:
-            final_findings = result.findings
-            verdict = result.verdict
+        if llm is not None:
             logger.info(
-                "LLM aggregator: %d deduped → %d final, recommendation=%s",
-                len(deduped), len(final_findings),
-                verdict.recommendation,
+                "Invoking aggregator LLM critic (prompt_version=%s) …",
+                PROMPT_VERSION,
             )
-        else:
-            final_findings = deduped
-            verdict = _rule_verdict(deduped)
-    else:
-        logger.info("No LLM key set — using rule-based aggregation")
-        final_findings = deduped
-        verdict = _rule_verdict(deduped)
+            try:
+                structured_llm = llm.with_structured_output(AggregatedReview)
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": _build_prompt(deduped)},
+                ]
+                result: AggregatedReview = structured_llm.invoke(messages)  # type: ignore[assignment]
+            except Exception as exc:
+                logger.warning("LLM critic failed — falling back to rule-based: %s", exc)
+                result = None
+
+            if result is not None:
+                final_findings = result.findings
+                verdict = result.verdict
+                logger.info(
+                    "LLM aggregator: %d deduped → %d final, recommendation=%s",
+                    len(deduped), len(final_findings),
+                    verdict.recommendation,
+                )
+                return {"final_findings": final_findings, "verdict": verdict}
+
+    # Rule-based path (default) — zero LLM overhead
+    logger.info("Using rule-based aggregation (fast path)")
+    final_findings = deduped
+    verdict = _rule_verdict(deduped)
 
     return {
         "final_findings": final_findings,  # plain list, overwrites

@@ -171,10 +171,13 @@ _VECTOR_DIR: str | None = None
 
 
 def _ensure_vector_dir() -> str:
+    """Return a persistent vector-store directory (not temp, so it survives
+    across runs).  Override via OPENCODEREVIEW_VECTOR_DIR env var."""
     global _VECTOR_DIR
     if _VECTOR_DIR is None:
-        _VECTOR_DIR = os.path.join(
-            tempfile.gettempdir(), "opencodereview_vectors"
+        _VECTOR_DIR = os.environ.get(
+            "OPENCODEREVIEW_VECTOR_DIR",
+            os.path.join(os.getcwd(), ".opencodereview", "vectors"),
         )
         os.makedirs(_VECTOR_DIR, exist_ok=True)
     return _VECTOR_DIR
@@ -184,18 +187,18 @@ def _repo_collection_name(repo: str) -> str:
     return f"repo_{repo.replace('/', '_')}"
 
 
-def _build_vector_store(
+def _get_or_build_collection(
     owner: str, repo_name: str,
     head_sha: str,
     exclude_paths: set[str],
 ) -> Collection:
-    """Fetch, chunk, embed, and index the non-changed files + past PRs.
+    """Return a cached ChromaDB collection for ``repo``, rebuilding only when
+    the base-branch SHA changes.
 
-    Each data source (codebase, past PRs, docs) is added to ChromaDB
-    incrementally so a transient failure in one source does not lose
-    progress from earlier sources.
+    The collection metadata key ``base_sha`` stores the SHA at build time.
+    On subsequent calls, if the collection exists with a matching ``base_sha``
+    it is returned immediately — no fetch, no chunk, no embedding.
     """
-
     if chromadb is None:
         raise RuntimeError("chromadb is not installed — cannot build vector store")
 
@@ -205,14 +208,55 @@ def _build_vector_store(
     client = chromadb.PersistentClient(path=_ensure_vector_dir())
     coll_name = _repo_collection_name(f"{owner}/{repo_name}")
 
-    # Drop and rebuild so the index is always fresh
+    # ── Cache hit: collection exists with matching SHA ────────────────────
     try:
+        existing = client.get_collection(name=coll_name, embedding_function=ef)
+        meta = existing.metadata or {}
+        if meta.get("base_sha") == head_sha:
+            logger.info(
+                "Vector store up-to-date (SHA=%s) — skipping rebuild",
+                head_sha[:7],
+            )
+            return existing
+        logger.info(
+            "SHA mismatch: cached=%s, current=%s — rebuilding",
+            (meta.get("base_sha") or "?"), head_sha[:7],
+        )
         client.delete_collection(coll_name)
     except Exception:
-        pass
+        pass  # First build or error → create fresh
+
+    return _build_vector_store(
+        owner, repo_name, head_sha, exclude_paths, client, coll_name, ef,
+    )
+
+
+def _build_vector_store(
+    owner: str, repo_name: str,
+    head_sha: str,
+    exclude_paths: set[str],
+    client: chromadb.PersistentClient,
+    coll_name: str,
+    ef,
+) -> Collection:
+    """Fetch, chunk, embed, and index the non-changed files + past PRs.
+
+    Each data source (codebase, past PRs, docs) is added to ChromaDB
+    incrementally so a transient failure in one source does not lose
+    progress from earlier sources.
+
+    .. note::
+
+        Prefer :func:`_get_or_build_collection` — this function always
+        rebuilds from scratch.
+    """
     collection = client.create_collection(
         name=coll_name,
-        metadata={"hnsw:space": "cosine"},
+        metadata={
+            "hnsw:space": "cosine",
+            "base_sha": head_sha,       # ← freshness key for cache lookups
+            "repo": f"{owner}/{repo_name}",
+        },
         embedding_function=ef,
     )
 
@@ -390,11 +434,11 @@ def retrieval_node(state: OpenCodeReviewState) -> dict:
         return {}
 
     try:
-        collection = _build_vector_store(
+        collection = _get_or_build_collection(
             owner, repo_name, head_sha_for_tree, changed_paths,
         )
     except Exception as exc:
-        logger.warning("Failed to build vector store: %s", exc)
+        logger.warning("Failed to build/get vector store: %s", exc)
         return {}
 
     # -- Query the store with the diff ----------------------------------------

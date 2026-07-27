@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 
 import gradio as gr
 from langgraph.types import Command
 
 from graph import build_graph
-from main import _cleanup_db, SYNTHETIC_STATE
+from main import NODE_LABELS, _cleanup_db, SYNTHETIC_STATE
 from observability import (
     build_run_metadata,
     enable_langsmith,
@@ -68,7 +69,10 @@ RECOMMENDATION_ICONS = {
 
 
 def _init_observability_ui() -> None:
-    """Initialise observability backends from env vars for the Gradio UI."""
+    """Initialise observability backends and HTTP cache for the Gradio UI."""
+    from github_client import _init_cache as _init_http_cache
+    _init_http_cache()
+
     # LangSmith: enable if key is in environment (check both modern and legacy names)
     ls_key = (
         os.environ.get("LANGSMITH_API_KEY", "").strip()
@@ -102,8 +106,13 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
     config["callbacks"] = callbacks
 
     try:
+        t0 = time.time()
         initial = {"repo": repo, "pr_number": pr_number}
-        list(graph.stream(initial, config))
+        for event in graph.stream(initial, config):
+            for node_name in event:
+                label = NODE_LABELS.get(node_name, node_name)
+                logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+        logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
         raise
@@ -235,7 +244,14 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
         state, config, cost_summary = _build_and_stream(repo.strip(), pr_number)
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
-        yield [None, None, None, None], f"❌ Review failed: {exc}"
+        yield [
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=True),
+            gr.update(visible=True, value=f"❌ Review failed: {exc}"),
+            None, None, None, None,
+            gr.update(visible=False),
+        ]
         return
 
     tasks = state.tasks
