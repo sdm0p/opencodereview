@@ -154,26 +154,30 @@ def compute_ragas_retrieval_scores(
     llm = _get_evaluator_llm()
     scores: dict[str, float] = {}
 
-    # ── Context Precision ────────────────────────────────────────────
-    try:
-        from ragas.metrics.collections import ContextPrecision
+    # ── Context Precision (reference-free) ───────────────────────────
+    # Uses LLMContextPrecisionWithoutReference which needs user_input +
+    # response + retrieved_contexts (no ground-truth reference required).
+    if answer:
+        try:
+            from ragas.metrics import LLMContextPrecisionWithoutReference
 
-        scorer = ContextPrecision(llm=llm)
-        sample = SingleTurnSample(
-            user_input=query,
-            retrieved_contexts=retrieved_contexts,
-        )
-        result = scorer.score(sample)
-        scores["context_precision"] = round(float(result.value), 4)
-        logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
-    except Exception as exc:
-        logger.warning("RAGAS context_precision failed: %s", exc)
-        scores["context_precision"] = 0.0
+            scorer = LLMContextPrecisionWithoutReference(llm=llm)
+            sample = SingleTurnSample(
+                user_input=query,
+                response=answer,
+                retrieved_contexts=retrieved_contexts,
+            )
+            result = scorer.single_turn_score(sample)
+            scores["context_precision"] = round(float(result), 4)
+            logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
+        except Exception as exc:
+            logger.warning("RAGAS context_precision failed: %s", exc)
+            scores["context_precision"] = 0.0
 
-    # ── Context Recall ───────────────────────────────────────────────
+    # ── Context Recall (requires ground_truth) ───────────────────────
     if ground_truth:
         try:
-            from ragas.metrics.collections import ContextRecall
+            from ragas.metrics import ContextRecall
 
             recall_scorer = ContextRecall(llm=llm)
             recall_sample = SingleTurnSample(
@@ -181,8 +185,8 @@ def compute_ragas_retrieval_scores(
                 retrieved_contexts=retrieved_contexts,
                 reference=ground_truth,
             )
-            recall_result = recall_scorer.score(recall_sample)
-            scores["context_recall"] = round(float(recall_result.value), 4)
+            recall_result = recall_scorer.single_turn_score(recall_sample)
+            scores["context_recall"] = round(float(recall_result), 4)
             logger.info("RAGAS context_recall: %.4f", scores["context_recall"])
         except Exception as exc:
             logger.warning("RAGAS context_recall failed: %s", exc)
@@ -199,8 +203,8 @@ def compute_ragas_retrieval_scores(
                 response=answer,
                 retrieved_contexts=retrieved_contexts,
             )
-            faithful_result = faithfulness_scorer.score(faithful_sample)
-            scores["faithfulness"] = round(float(faithful_result.value), 4)
+            faithful_result = faithfulness_scorer.single_turn_score(faithful_sample)
+            scores["faithfulness"] = round(float(faithful_result), 4)
             logger.info("RAGAS faithfulness: %.4f", scores["faithfulness"])
         except Exception as exc:
             logger.warning("RAGAS faithfulness failed: %s", exc)
@@ -211,13 +215,27 @@ def compute_ragas_retrieval_scores(
         try:
             from ragas.metrics import ResponseRelevancy
 
-            relevancy_scorer = ResponseRelevancy(llm=llm)
+            # ResponseRelevancy also needs an embedding model for cosine
+            # similarity.  We create a lightweight one from the project's
+            # ChromaDB embedding function (ONNX MiniLM, already cached).
+            embeddings = _create_ragas_embeddings()
+            if embeddings is None:
+                raise RuntimeError(
+                    "No embedding model available for ResponseRelevancy — "
+                    "install chromadb"
+                )
+
+            relevancy_scorer = ResponseRelevancy(
+                llm=llm,
+                embeddings=embeddings,
+                strictness=1,  # Groq only supports n=1
+            )
             relevancy_sample = SingleTurnSample(
                 user_input=query,
                 response=answer,
             )
-            relevancy_result = relevancy_scorer.score(relevancy_sample)
-            scores["answer_relevancy"] = round(float(relevancy_result.value), 4)
+            relevancy_result = relevancy_scorer.single_turn_score(relevancy_sample)
+            scores["answer_relevancy"] = round(float(relevancy_result), 4)
             logger.info("RAGAS answer_relevancy: %.4f", scores["answer_relevancy"])
         except Exception as exc:
             logger.warning("RAGAS answer_relevancy failed: %s", exc)
@@ -232,7 +250,60 @@ def compute_ragas_retrieval_scores(
         logger.warning("RAGAS mmr failed: %s", exc)
         scores["mmr"] = 0.0
 
+    # ── Context Precision (reference-based, fallback when no answer) ─
+    if "context_precision" not in scores and ground_truth:
+        try:
+            from ragas.metrics import ContextPrecision
+
+            scorer = ContextPrecision(llm=llm)
+            sample = SingleTurnSample(
+                user_input=query,
+                retrieved_contexts=retrieved_contexts,
+                reference=ground_truth,
+            )
+            result = scorer.single_turn_score(sample)
+            scores["context_precision"] = round(float(result), 4)
+            logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
+        except Exception as exc:
+            logger.warning("RAGAS context_precision failed: %s", exc)
+            scores["context_precision"] = 0.0
+
     return scores
+
+
+def _create_ragas_embeddings():
+    """Return a lightweight embedding object compatible with RAGAS metrics.
+
+    Wraps the ChromaDB ONNX MiniLM embedding function so that metrics like
+    ``ResponseRelevancy`` can compute cosine similarity between embeddings.
+    The underlying ONNX model is cached globally and loads in <1 s.
+    """
+    try:
+        from chromadb.utils import embedding_functions
+
+        if hasattr(embedding_functions, "ONNXMiniLM_L6_V2"):
+            ef = embedding_functions.ONNXMiniLM_L6_V2()
+        else:
+            ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+
+        class _RagasEmbeddings:
+            def __init__(self, ef):
+                self._ef = ef
+
+            def embed_query(self, text: str) -> list[float]:
+                result = self._ef([text])[0]
+                return list(result) if not isinstance(result, list) else result
+
+            def embed_documents(self, texts: list[str]) -> list[list[float]]:
+                results = self._ef(texts)
+                return [list(r) if not isinstance(r, list) else r for r in results]
+
+        return _RagasEmbeddings(ef)
+    except Exception as exc:
+        logger.warning("Cannot create RAGAS embeddings: %s", exc)
+        return None
 
 
 def _compute_mmr(
