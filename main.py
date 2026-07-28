@@ -300,6 +300,52 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                     handler=handler,
                 )
 
+            # ── Compute and log RAGAS retrieval scores ─────────────────
+            context_chunks = state.values.get("context_chunks", [])
+            if context_chunks:
+                try:
+                    from eval_data.ragas_eval import compute_ragas_retrieval_scores
+
+                    query = state.values.get("diff", "") or ""
+                    contexts = [c.content for c in context_chunks if c.content]
+
+                    # Build answer text from findings + verdict for
+                    # faithfulness & answer_relevancy metrics
+                    answer_lines = []
+                    for f in final_findings:
+                        answer_lines.append(
+                            f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
+                        )
+                    if state.values.get("verdict"):
+                        v = state.values["verdict"]
+                        answer_lines.append(
+                            f"Verdict: {v.recommendation} (score={v.overall_score}/10) — {v.summary}"
+                        )
+                    answer_text = "\n".join(answer_lines) if answer_lines else None
+
+                    ragas_scores = compute_ragas_retrieval_scores(
+                        query=query,
+                        retrieved_contexts=contexts,
+                        answer=answer_text,
+                    )
+
+                    for metric_name, value in ragas_scores.items():
+                        log_langfuse_score(
+                            name=f"ragas_{metric_name}",
+                            value=value,
+                            comment=f"{repo}#{pr_number} — {metric_name}",
+                            handler=handler,
+                        )
+
+                    logger.info(
+                        "  RAGAS scores logged to Langfuse: %s",
+                        " | ".join(f"{k}={v:.4f}" for k, v in ragas_scores.items()),
+                    )
+                except ImportError:
+                    logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
+                except Exception as exc:
+                    logger.warning("RAGAS scoring failed: %s", exc)
+
             logger.info("=" * 60)
 
             click.echo()
