@@ -38,18 +38,21 @@ _RAGAS_AVAILABLE: bool | None = None
 
 
 def _check_ragas() -> bool:
-    """Return True if RAGAS and litellm are available."""
+    """Return True if RAGAS is available.
+
+    Note: ``litellm`` is NOT required because RAGAS scoring uses the
+    project's own LLM factory (Gemini or Groq via LangChain), not
+    litellm internally.
+    """
     global _RAGAS_AVAILABLE
     if _RAGAS_AVAILABLE is not None:
         return _RAGAS_AVAILABLE
     try:
         import ragas  # noqa: F401
-        import litellm  # noqa: F401
         _RAGAS_AVAILABLE = True
     except ImportError:
         logger.warning(
-            "ragas or litellm not installed. Install with: "
-            "pip install ragas litellm"
+            "ragas not installed. Install with: pip install ragas"
         )
         _RAGAS_AVAILABLE = False
     return _RAGAS_AVAILABLE

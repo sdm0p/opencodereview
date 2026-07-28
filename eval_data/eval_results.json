@@ -2,15 +2,16 @@
   {
     "tp": 0,
     "fp": 0,
-    "fn": 1,
+    "fn": 3,
     "precision": 0.0,
     "recall": 0.0,
     "f1": 0.0,
     "agent_findings": 0,
-    "human_comments": 1,
-    "id": "test_repo_test_1",
-    "repo": "demo-org/demo-repo",
-    "pr_number": 1,
-    "title": "Test PR for evaluation"
+    "human_comments": 3,
+    "id": "psf_requests_7431",
+    "repo": "psf/requests",
+    "pr_number": 7431,
+    "title": "Fix mutability issues with headers input types",
+    "trace_id": null
   }
 ]

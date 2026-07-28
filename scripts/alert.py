@@ -99,12 +99,7 @@ def _run_smoke_test() -> dict[str, Any]:
         "metadata": metadata,
     }
 
-    _alert_trace_ctx = _langfuse_trace(
-        trace_name="opencodereview/alert-check",
-        tags=["cli", "alert", "demo-org/demo-repo"],
-        session_id=thread_id,
-    )
-    with _langfuse_trace(
+    with langfuse_trace(
         trace_name="opencodereview/alert-check",
         tags=["cli", "alert", "demo-org/demo-repo"],
         session_id=thread_id,
