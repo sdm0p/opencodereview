@@ -160,12 +160,14 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                 value=verdict.overall_score,
                 comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
                 trace_id=run_trace_id,
+                handler=handler,
             )
             log_langfuse_score(
                 name="findings_count",
                 value=len(findings),
                 comment=f"{repo}#{pr_number}",
                 trace_id=run_trace_id,
+                handler=handler,
             )
 
         # ── Compute and log RAGAS retrieval scores ─────────────────
@@ -200,12 +202,14 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
 
                 # Log RAGAS scores with the explicitly captured trace_id
                 # to avoid contextvar loss during the long computation.
+                # handler=handler is also passed as fallback resolution.
                 for metric_name, value in ragas_scores.items():
                     log_langfuse_score(
                         name=f"ragas_{metric_name}",
                         value=value,
                         comment=f"{repo}#{pr_number} — {metric_name}",
                         trace_id=run_trace_id,
+                        handler=handler,
                     )
 
                 logger.info(
