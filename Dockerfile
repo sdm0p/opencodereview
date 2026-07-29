@@ -49,7 +49,7 @@ RUN pip install --no-cache-dir \
     langchain-groq \
     langfuse \
     langchain-google-genai \
-    ragas \
+    "ragas>=0.3,<0.4" \
     litellm
 
 # -- Stage 2: Runtime (default) -----------------------------------------------
