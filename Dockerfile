@@ -69,10 +69,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Fallback: multi-stage COPY may not transfer packages reliably on HF Spaces build infra
-# --no-deps prevents re-resolving transitive deps that may conflict with
-# chromadb's pinned numpy version (already installed via builder COPY).
-RUN pip install --no-deps --no-cache-dir langfuse ragas litellm
+# Fallback: multi-stage COPY may not transfer packages reliably on HF Spaces build infra.
+# Install ragas+litellm normally (with deps) so transitive dependencies like
+# numpy, datasets, etc. are available at import time.
+RUN pip install --no-cache-dir langfuse ragas litellm
+
+# Verify ragas is importable
+RUN python -c "import ragas; print(f'ragas {ragas.__version__} installed OK')"
 
 # Copy application code
 COPY . .
