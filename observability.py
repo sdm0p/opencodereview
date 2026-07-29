@@ -650,7 +650,7 @@ def log_langfuse_score(
         lf.create_score(**kwargs)
         lf.flush()
     except Exception as exc:
-        logger.debug("Failed to log Langfuse score: %s", exc)
+        logger.warning("Failed to log Langfuse score '%s': %s", name, exc)
 
 
 def update_langfuse_trace(

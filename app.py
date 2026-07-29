@@ -33,6 +33,7 @@ from observability import (
     langfuse_trace,
     log_error_to_backends,
     log_langfuse_score,
+    _resolve_langfuse_trace_id,
     HealthStatus,
     TokenCostCallback,
     check_groq_connectivity,
@@ -144,8 +145,13 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
 
         state = graph.get_state(config)
 
-        # Log verdict and findings scores to Langfuse (still within
-        # propagate_attributes context to get trace_id resolution)
+        # ── Log verdict/findings scores and capture trace_id ───────
+        # Capture trace_id NOW (immediately after graph completes)
+        # so it can be used after the long-running RAGAS computation.
+        # _resolve_langfuse_trace_id() can return None after ~60s delays
+        # because contextvars may be lost.
+        run_trace_id = _resolve_langfuse_trace_id(handler)
+
         verdict = state.values.get("verdict")
         findings = state.values.get("final_findings", [])
         if verdict:
@@ -153,13 +159,13 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                 name="verdict_score",
                 value=verdict.overall_score,
                 comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
-                handler=handler,
+                trace_id=run_trace_id,
             )
             log_langfuse_score(
                 name="findings_count",
                 value=len(findings),
                 comment=f"{repo}#{pr_number}",
-                handler=handler,
+                trace_id=run_trace_id,
             )
 
         # ── Compute and log RAGAS retrieval scores ─────────────────
@@ -192,12 +198,14 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                     answer=answer_text,
                 )
 
+                # Log RAGAS scores with the explicitly captured trace_id
+                # to avoid contextvar loss during the long computation.
                 for metric_name, value in ragas_scores.items():
                     log_langfuse_score(
                         name=f"ragas_{metric_name}",
                         value=value,
                         comment=f"{repo}#{pr_number} — {metric_name}",
-                        handler=handler,
+                        trace_id=run_trace_id,
                     )
 
                 logger.info(

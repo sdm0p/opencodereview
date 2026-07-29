@@ -34,6 +34,7 @@ from observability import (
     langfuse_trace,
     log_error_to_backends,
     log_langfuse_score,
+    _resolve_langfuse_trace_id,
     TokenCostCallback,
 )
 from state import ChangedFile, ContextChunk, Finding, Severity, Verdict
@@ -284,6 +285,10 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
             # Show cost & TTFT
             logger.info("  %s", cost_tracker.summary())
 
+            # Capture trace_id NOW (immediately after graph completes)
+            # so it can be used after the long-running RAGAS computation.
+            run_trace_id = _resolve_langfuse_trace_id(handler)
+
             # Log verdict score to Langfuse and update trace metadata
             if state.values.get("verdict"):
                 v = state.values["verdict"]
@@ -291,13 +296,13 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                     name="verdict_score",
                     value=v.overall_score,
                     comment=f"{repo}#{pr_number} — {v.recommendation}: {v.summary[:100]}",
-                    handler=handler,
+                    trace_id=run_trace_id,
                 )
                 log_langfuse_score(
                     name="findings_count",
                     value=len(final_findings),
                     comment=f"{repo}#{pr_number}",
-                    handler=handler,
+                    trace_id=run_trace_id,
                 )
 
             # ── Compute and log RAGAS retrieval scores ─────────────────
@@ -329,12 +334,14 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                         answer=answer_text,
                     )
 
+                    # Log RAGAS scores with the explicitly captured trace_id
+                    # to avoid contextvar loss during the long computation.
                     for metric_name, value in ragas_scores.items():
                         log_langfuse_score(
                             name=f"ragas_{metric_name}",
                             value=value,
                             comment=f"{repo}#{pr_number} — {metric_name}",
-                            handler=handler,
+                            trace_id=run_trace_id,
                         )
 
                     logger.info(
