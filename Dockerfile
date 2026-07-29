@@ -41,11 +41,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Optional dependencies (chromadb for vector store, langchain-groq for LLM)
+# ragas and litellm are installed here (not just via requirements.txt)
+# so pip resolves all transitive deps (numpy, etc.) together with
+# chromadb, avoiding version conflicts at runtime.
 RUN pip install --no-cache-dir \
     chromadb \
     langchain-groq \
     langfuse \
-    langchain-google-genai
+    langchain-google-genai \
+    ragas \
+    litellm
 
 # -- Stage 2: Runtime (default) -----------------------------------------------
 FROM python:3.12-slim AS runtime
@@ -65,7 +70,9 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Fallback: multi-stage COPY may not transfer packages reliably on HF Spaces build infra
-RUN pip install --no-cache-dir langfuse ragas litellm
+# --no-deps prevents re-resolving transitive deps that may conflict with
+# chromadb's pinned numpy version (already installed via builder COPY).
+RUN pip install --no-deps --no-cache-dir langfuse ragas litellm
 
 # Copy application code
 COPY . .
