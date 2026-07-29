@@ -73,10 +73,12 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Install ragas+litellm normally (with deps) so transitive dependencies like
 # numpy, datasets, etc. are available at import time.
 # Pin numpy<2 to stay compatible with chromadb (uses numpy.float_ removed in 2.x)
-RUN pip install --no-cache-dir langfuse "ragas>=0.3,<0.4" "numpy<2" litellm
+RUN pip install --no-cache-dir langfuse "ragas>=0.3,<0.4" "numpy<2" "litellm>=1.0,<2.0"
 
-# Verify ragas + chromadb are both importable (numpy version compatibility check)
-RUN python -c "import ragas, chromadb; print(f'ragas {ragas.__version__} + chromadb OK')"
+# Verify critical packages are importable
+RUN python -c "import chromadb; print('chromadb OK')"
+RUN python -c "import ragas; print(f'ragas {ragas.__version__} OK')"
+RUN python -c "import litellm; print(f'litellm {litellm.__version__} OK')"
 
 # Copy application code
 COPY . .
