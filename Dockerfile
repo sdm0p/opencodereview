@@ -69,19 +69,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Fallback: multi-stage COPY may not transfer packages reliably on HF Spaces build infra.
-# Install ragas+litellm normally (with deps) so transitive dependencies like
-# numpy, datasets, etc. are available at import time.
-RUN pip install --no-cache-dir langfuse "ragas>=0.3,<0.4" litellm
-
-# Verify critical packages are importable
-RUN python -c "import chromadb; print('chromadb OK')"
-RUN python -c "import ragas; print(f'ragas {ragas.__version__} OK')"
-RUN python -c "import litellm; print(f'litellm {litellm.__version__} OK')"
-
 # Copy application code
 COPY . .
 COPY docker-entrypoint.sh /docker-entrypoint.sh
+
+# Install ragas+litellm as fallback in case multi-stage COPY missed them
+RUN pip install --no-cache-dir ragas litellm
 
 # Non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app \
