@@ -162,7 +162,54 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                 handler=handler,
             )
 
-    return state, config, cost_tracker.summary()
+        # ── Compute and log RAGAS retrieval scores ─────────────────
+        ragas_scores: dict[str, float] = {}
+        context_chunks = state.values.get("context_chunks", [])
+        if context_chunks:
+            try:
+                from eval_data.ragas_eval import compute_ragas_retrieval_scores
+
+                query = state.values.get("diff", "") or ""
+                contexts = [c.content for c in context_chunks if c.content]
+
+                # Build answer text from findings + verdict for
+                # faithfulness & answer_relevancy metrics
+                answer_lines = []
+                for f in findings:
+                    answer_lines.append(
+                        f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
+                    )
+                if state.values.get("verdict"):
+                    v = state.values["verdict"]
+                    answer_lines.append(
+                        f"Verdict: {v.recommendation} (score={v.overall_score}/10) — {v.summary}"
+                    )
+                answer_text = "\n".join(answer_lines) if answer_lines else None
+
+                ragas_scores = compute_ragas_retrieval_scores(
+                    query=query,
+                    retrieved_contexts=contexts,
+                    answer=answer_text,
+                )
+
+                for metric_name, value in ragas_scores.items():
+                    log_langfuse_score(
+                        name=f"ragas_{metric_name}",
+                        value=value,
+                        comment=f"{repo}#{pr_number} — {metric_name}",
+                        handler=handler,
+                    )
+
+                logger.info(
+                    "RAGAS scores logged to Langfuse: %s",
+                    " | ".join(f"{k}={v:.4f}" for k, v in ragas_scores.items()),
+                )
+            except ImportError:
+                logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
+            except Exception as exc:
+                logger.warning("RAGAS scoring failed: %s", exc)
+
+    return state, config, cost_tracker.summary(), ragas_scores
 
 
 def _format_findings_table(findings: list) -> str:
@@ -232,6 +279,72 @@ def _format_verdict(verdict: Verdict | None) -> str:
     )
 
 
+RAGAS_METRIC_LABELS = {
+    "context_precision": "Context Precision",
+    "context_recall": "Context Recall",
+    "faithfulness": "Faithfulness",
+    "answer_relevancy": "Answer Relevancy",
+    "mmr": "Mean Reciprocal Rank",
+}
+
+RAGAS_METRIC_TOOLTIPS = {
+    "context_precision": "Are the most relevant code chunks ranked first?",
+    "context_recall": "Did we find ALL the relevant code? (requires ground truth)",
+    "faithfulness": "Does the review answer stick to the retrieved code?",
+    "answer_relevancy": "Does the review address the PR diff?",
+    "mmr": "How early in the list does the first useful chunk appear?",
+}
+
+
+def _format_ragas_scores(scores: dict[str, float]) -> str:
+    """Build an HTML card showing RAGAS retrieval quality metrics."""
+    if not scores:
+        return ""
+
+    def _score_color(val: float) -> str:
+        if val >= 0.8:
+            return "#16a34a"
+        elif val >= 0.5:
+            return "#ca8a04"
+        else:
+            return "#dc2626"
+
+    bars: list[str] = []
+    for key, value in scores.items():
+        label = RAGAS_METRIC_LABELS.get(key, key.replace("_", " ").title())
+        tooltip = RAGAS_METRIC_TOOLTIPS.get(key, "")
+        color = _score_color(value)
+        pct = int(value * 100)
+        bars.append(
+            f'<div style="margin-bottom:12px">'
+            f'<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
+            f'<span style="font-weight:500;color:var(--text-secondary)">'
+            f'{label}'
+            + (f'<span style="margin-left:4px;cursor:help;font-size:0.85em" '
+               f'title="{tooltip}">ℹ️</span>' if tooltip else '')
+            + f'</span>'
+            f'<span style="font-weight:700;color:{color}">{value:.3f}</span>'
+            f'</div>'
+            f'<div style="height:8px;background:var(--spinner-track);border-radius:4px;overflow:hidden">'
+            f'<div style="height:100%;width:{pct}%;background:{color};'
+            f'border-radius:4px;transition:width 0.6s ease"></div>'
+            f'</div>'
+            f'</div>'
+        )
+
+    return (
+        f'<div style="border:1px solid var(--border-color);border-radius:12px;'
+        f'padding:16px 20px;margin-top:12px;background:var(--bg-card)">'
+        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">'
+        f'<span style="font-size:1.1em">📊</span>'
+        f'<span style="font-weight:600;color:var(--text-primary)">'
+        f'Retrieval Quality (RAGAS)</span>'
+        f'</div>'
+        + "".join(bars)
+        + f'</div>'
+    )
+
+
 def _format_findings_count(findings: list) -> str:
     """Build a compact summary count per severity."""
     counts: dict[str, int] = {}
@@ -277,7 +390,7 @@ def _get_deploy_info() -> tuple[str, str]:
 def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     """Run the review pipeline up to human-in-the-loop interrupt."""
     if not repo or "/" not in repo:
-        yield [None, None, None, None], "❌ Enter a repo in `owner/name` format."
+        yield [None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
         return
 
     _cleanup_db()
@@ -285,7 +398,7 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     progress(0.1, desc="Building graph…")
 
     try:
-        state, config, cost_summary = _build_and_stream(repo.strip(), pr_number)
+        state, config, cost_summary, ragas_scores = _build_and_stream(repo.strip(), pr_number)
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
         yield [
@@ -293,7 +406,7 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
             gr.update(visible=False),
             gr.update(visible=True),
             gr.update(visible=True, value=f"❌ Review failed: {exc}"),
-            None, None, None, None,
+            None, None, None, None, None,
             gr.update(visible=False),
         ]
         return
@@ -302,7 +415,7 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     values = state.values
 
     if not tasks:
-        yield [None, None, None, None], "ℹ️ Review completed without findings."
+        yield [None, None, None, None, None], "ℹ️ Review completed without findings."
         return
 
     verdict: Verdict | None = values.get("verdict")
@@ -311,6 +424,7 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     progress(0.8, desc="Formatting results…")
 
     verdict_html = _format_verdict(verdict)
+    ragas_html = _format_ragas_scores(ragas_scores)
     findings_html = _format_findings_table(findings)
     count_html = _format_findings_count(findings)
     # Append cost info to count display
@@ -321,7 +435,7 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     )
 
     yield (
-        [verdict_html, findings_html, count_html, config_json],
+        [verdict_html, findings_html, count_html, ragas_html, config_json],
         None,
     )
 
@@ -608,6 +722,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
             verdict_display = gr.HTML()
             count_display = gr.HTML()
             findings_display = gr.HTML()
+            ragas_display = gr.HTML()
 
             with gr.Row():
                 approve_btn = gr.Button("✅ Approve & Post", variant="primary")
@@ -624,7 +739,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                 gr.update(visible=True, variant="stop"),
                 gr.update(visible=False),
                 gr.update(visible=False, value=""),
-                *[None, None, None, None],
+                *[None, None, None, None, None],
                 gr.update(visible=False),
             ]
 
@@ -635,11 +750,11 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                         gr.update(visible=False),
                         gr.update(visible=True),
                         gr.update(visible=True, value=err),
-                        *[None, None, None, None],
+                        *[None, None, None, None, None],
                         gr.update(visible=False),
                     ]
                 else:
-                    verdict_html, findings_html, count_html, config_json = result
+                    verdict_html, findings_html, count_html, ragas_html, config_json = result
                     yield [
                         gr.update(visible=False),
                         gr.update(visible=False),
@@ -648,6 +763,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                         gr.update(value=verdict_html),
                         gr.update(value=count_html),
                         gr.update(value=findings_html),
+                        gr.update(value=ragas_html),
                         config_json,
                         gr.update(visible=True),
                     ]
@@ -663,6 +779,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                 verdict_display,
                 count_display,
                 findings_display,
+                ragas_display,
                 pr_state,
                 results_panel,
             ],
