@@ -74,7 +74,8 @@ COPY . .
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
 # Install ragas+litellm as fallback in case multi-stage COPY missed them
-RUN pip install --no-cache-dir ragas litellm
+# Pin ragas to v0.3.x to match the builder stage (code uses single_turn_score API)
+RUN pip install --no-cache-dir "ragas>=0.3,<0.4" litellm
 
 # Non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app \
