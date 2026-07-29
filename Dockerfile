@@ -74,8 +74,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # numpy, datasets, etc. are available at import time.
 RUN pip install --no-cache-dir langfuse ragas litellm
 
-# Verify ragas is importable
-RUN python -c "import ragas; print(f'ragas {ragas.__version__} installed OK')"
+# Verify ragas + chromadb are both importable (numpy version compatibility check)
+RUN python -c "import ragas, chromadb; print(f'ragas {ragas.__version__} + chromadb OK')"
 
 # Copy application code
 COPY . .
