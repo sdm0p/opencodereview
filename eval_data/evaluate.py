@@ -582,6 +582,7 @@ def _log_to_observability(results: list[dict]) -> None:
     from observability import (
         is_langfuse_enabled,
         is_langsmith_enabled,
+        log_langfuse_score,
     )
 
     # Compute aggregate metrics
@@ -626,9 +627,12 @@ def _log_to_observability(results: list[dict]) -> None:
     # ── Langfuse: create scores via SDK ──────────────────────────────────
     if is_langfuse_enabled():
         try:
-            from langfuse import Langfuse
+            # Use the v4 shared singleton so per-PR scores logged via
+            # log_langfuse_score (also get_client()) share one client and
+            # are flushed together below.
+            from langfuse import get_client
 
-            lf = Langfuse()
+            lf = get_client()
             run_name = f"eval-{datetime.now():%Y%m%d-%H%M%S}"
 
             # Log per-PR scores (linked to each PR's pipeline trace)
@@ -649,16 +653,17 @@ def _log_to_observability(results: list[dict]) -> None:
                     comment=pr_comment + f" — P={r['precision']:.3f} R={r['recall']:.3f}",
                     metadata=pr_metadata,
                 )
-                # Per-PR RAGAS scores
+                # Per-PR RAGAS scores — logged via the shared scoring path with
+                # the canonical ``ragas_`` prefix so trace-linking + error
+                # visibility apply uniformly (same as app.py/main.py).
                 for ragas_key in ("context_precision", "context_recall",
                                   "faithfulness", "answer_relevancy", "mmr"):
                     if ragas_key in r:
-                        lf.create_score(
-                            name=ragas_key,
+                        log_langfuse_score(
+                            name=f"ragas_{ragas_key}",
                             value=r[ragas_key],
-                            trace_id=pr_trace_id,
                             comment=pr_comment,
-                            metadata=pr_metadata,
+                            trace_id=pr_trace_id,
                         )
 
             # Log aggregate scores (no trace_id — spans multiple runs)

@@ -33,9 +33,17 @@ services:
     environment:
       # AI provider keys
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENCODEREVIEW_ANTHROPIC_KEY=${OPENCODEREVIEW_ANTHROPIC_KEY:-}
       # GitHub
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Observability (optional)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-}
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-}
       # Language
       - LANG=en_US.UTF-8
     volumes:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+import requests
 from typing import Any
 
 from github_client import GitHubSession, resolve_token

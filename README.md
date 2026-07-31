@@ -19,7 +19,7 @@ pinned: false
 
 <p align="center">
   <a href="https://huggingface.co/spaces/sdm0/opencodereview"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue" alt="Hugging Face Space"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="#"><img src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C?logo=langchain" alt="LangGraph"></a>
   <a href="#"><img src="https://img.shields.io/badge/LLMs-Gemini%20%7C%20Groq-blueviolet" alt="LLMs"></a>
   <a href="#"><img src="https://img.shields.io/badge/License-Unlicensed-lightgrey" alt="License"></a>
@@ -183,7 +183,7 @@ checkpointing (needed for the interrupt/resume round-trip):
 
 ### Prerequisites
 
-- Python **3.11+**
+- Python **3.12+**
 - A **GitHub token** (`GITHUB_TOKEN` or `opencodereview auth login`) — required to fetch PRs and post comments
 - **One LLM key**: `GEMINI_API_KEY` (preferred) or `GROQ_API_KEY` (fallback)
 
@@ -543,8 +543,7 @@ opencodereview/
 │   ├── test_coverage_reviewer.py#   LLM: test-coverage gaps
 │   ├── aggregator.py            #   Dedupe, filter, verdict
 │   ├── human_approval.py        #   interrupt() — human-in-the-loop gate
-│   ├── executor.py              #   Post inline comments to GitHub
-│   └── passthrough.py           #   Placeholder/debug node (not wired into the graph)
+│   └── executor.py              #   Post inline comments to GitHub
 ├── prompts/                     # Versioned system prompts (correctness/security/…_v1.txt)
 ├── eval_data/                   # Evaluation harness
 │   ├── fetcher.py               #   Build ground-truth dataset (prs.jsonl)

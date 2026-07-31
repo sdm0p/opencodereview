@@ -29,6 +29,7 @@ from observability import (
     is_langfuse_enabled,
     is_langsmith_enabled,
     estimate_groq_cost,
+    flush_langfuse,
     format_cost,
     langfuse_trace,
     log_error_to_backends,
@@ -220,6 +221,13 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                 logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
             except Exception as exc:
                 logger.warning("RAGAS scoring failed: %s", exc)
+
+    # Close the checkpointer connection (checkpoints persist to disk so the
+    # resume path opens a fresh one) and ship any queued Langfuse scores.
+    conn = getattr(graph, "_opencodereview_conn", None)
+    if conn:
+        conn.close()
+    flush_langfuse()
 
     return state, config, cost_tracker.summary(), ragas_scores
 
@@ -479,10 +487,16 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
         )
         if cost_tracker.usage:
             msg += f" _{cost_tracker.summary()}_"
-        return msg
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "resume_review", "action": action})
-        return f"❌ Error: {exc}"
+        msg = f"❌ Error: {exc}"
+    finally:
+        # Close the checkpointer connection and ship any queued scores.
+        conn = getattr(graph, "_opencodereview_conn", None)
+        if conn:
+            conn.close()
+        flush_langfuse()
+    return msg
 
 
 def run_smoke(progress=gr.Progress()):
@@ -530,6 +544,12 @@ def run_smoke(progress=gr.Progress()):
 
     state = graph.get_state(config)
     tasks = state.tasks
+
+    # Close the checkpointer connection and ship any queued Langfuse scores.
+    conn = getattr(graph, "_opencodereview_conn", None)
+    if conn:
+        conn.close()
+    flush_langfuse()
 
     if not tasks:
         yield [None, None, None, None, None], "ℹ️ Smoke test completed without findings."

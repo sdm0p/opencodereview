@@ -30,6 +30,7 @@ from observability import (
     get_langfuse_handler,
     is_langsmith_enabled,
     estimate_groq_cost,
+    flush_langfuse,
     format_cost,
     langfuse_trace,
     log_error_to_backends,
@@ -185,12 +186,20 @@ def review(repo: str, pr_number: int, smoke: bool) -> None:
 
     graph = build_graph(DB_PATH)
 
-    if smoke:
-        _test_offline(graph)
-    else:
-        _run_with_hitl(graph, repo, pr_number)
-
-    _cleanup_db()
+    try:
+        if smoke:
+            _test_offline(graph)
+        else:
+            _run_with_hitl(graph, repo, pr_number)
+    finally:
+        # Close the graph's SQLite connection (checkpoints persist to disk,
+        # so a later resume can open a fresh one) and clean up the DB file.
+        conn = getattr(graph, "_opencodereview_conn", None)
+        if conn:
+            conn.close()
+        _cleanup_db()
+        # Ship any queued Langfuse scores before the process exits.
+        flush_langfuse()
 
 
 def _run_with_hitl(graph, repo: str, pr_number: int) -> None:

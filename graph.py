@@ -101,4 +101,8 @@ def build_graph(db_path: str | None = None) -> StateGraph:
     conn = sqlite3.connect(resolved_path, check_same_thread=False)
     saver = SqliteSaver(conn, serde=serde)
 
-    return builder.compile(checkpointer=saver)
+    compiled = builder.compile(checkpointer=saver)
+    # Expose the connection so callers can close it once the graph run is
+    # fully finished (prevents file-handle leaks in the long-running UI).
+    compiled._opencodereview_conn = conn
+    return compiled

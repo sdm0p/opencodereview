@@ -5,10 +5,11 @@ Provides a single-entry-point module for all tracing, cost tracking,
 metadata attribution, health checks, and alerting concerns.
 
 Backends
--------- * **LangSmith** — automatic via ``LANGSMITH_API_KEY`` / ``LANGSMITH_PROJECT``
- *                (also accepts legacy ``LANGCHAIN_API_KEY`` for back-compat)
-  env vars.  LangGraph/LangChain reads these at import time and starts
-  tracing without any per-call code.
+--------
+* **LangSmith** — automatic via ``LANGSMITH_API_KEY`` / ``LANGSMITH_PROJECT``
+  (also accepts legacy ``LANGCHAIN_API_KEY`` for back-compat) env vars.
+  LangGraph/LangChain reads these at import time and starts tracing
+  without any per-call code.
 * **Langfuse** — explicit ``CallbackHandler`` instantiated only when
   ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set.
 
@@ -270,26 +271,39 @@ def build_run_metadata(
 # ─── Cost tracking ─────────────────────────────────────────────────────────
 
 
-# Groq published per-1M-token pricing (USD) — as of 2025-07
-# Source: https://console.groq.com/docs/pricing
-GROQ_PRICING: dict[str, dict[str, float]] = {
+# Per-1M-token pricing (USD), keyed by model name.
+# Groq source:  https://console.groq.com/docs/pricing   (as of 2025-07)
+# NOTE: Gemini rates below are APPROXIMATE published per-1M-token rates
+#       (USD) and may drift over time — verify against Google's pricing page
+#       before relying on them for billing reconciliation.
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    # ── Groq ──────────────────────────────────────────────────────────
     "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+    # ── Google Gemini ─────────────────────────────────────────────────
+    # Approximate published per-1M-token rates (USD) for Gemini Flash-Lite.
+    "gemini-3.1-flash-lite": {"input": 0.10, "output": 0.40},
     # Fallback for unknown models — pessimistic estimate
     "__default__": {"input": 1.00, "output": 1.00},
 }
 
+# Backward-compatible alias — previously Groq-only; now the shared table
+# so any external references keep resolving.
+GROQ_PRICING = MODEL_PRICING
 
-def estimate_groq_cost(
+
+def estimate_model_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
 ) -> float:
-    """Estimate the USD cost of a Groq LLM call.
+    """Estimate the USD cost of an LLM call by looking up ``MODEL_PRICING``.
 
     Parameters
     ----------
     model : str
-        Groq model name (e.g. ``"llama-3.3-70b-versatile"``).
+        Model name (e.g. ``"llama-3.3-70b-versatile"`` or
+        ``"gemini-3.1-flash-lite"``).  Unknown models fall back to the
+        pessimistic ``__default__`` rate.
     input_tokens : int
         Number of tokens in the prompt (system + user messages).
     output_tokens : int
@@ -300,10 +314,25 @@ def estimate_groq_cost(
     float
         Estimated cost in USD.
     """
-    pricing = GROQ_PRICING.get(model, GROQ_PRICING["__default__"])
+    pricing = MODEL_PRICING.get(model, MODEL_PRICING["__default__"])
     input_cost = (input_tokens / 1_000_000) * pricing["input"]
     output_cost = (output_tokens / 1_000_000) * pricing["output"]
     return round(input_cost + output_cost, 6)
+
+
+def estimate_groq_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Estimate the USD cost of a Groq LLM call (backward-compatible).
+
+    Thin wrapper around :func:`estimate_model_cost`.  Kept so existing
+    callers (``app.py``, ``main.py``, :class:`TokenCostCallback`) keep
+    working unchanged — it now also prices Gemini and any other model in
+    :data:`MODEL_PRICING` correctly instead of using the Groq-only table.
+    """
+    return estimate_model_cost(model, input_tokens, output_tokens)
 
 
 def format_cost(cost_usd: float) -> str:
@@ -602,6 +631,32 @@ def _resolve_langfuse_trace_id(handler: Any) -> Optional[str]:
     return None
 
 
+def flush_langfuse() -> None:
+    """Flush the shared Langfuse client's pending events once per run.
+
+    In langfuse v4+ ``get_client()`` returns a process-wide singleton; callers
+    (e.g. ``main.py`` after the RAGAS block, ``app.py`` after streaming) should
+    call this once at the end of a run so queued scores/traces are shipped
+    before the process exits — instead of flushing inside every
+    :func:`log_langfuse_score` call.
+
+    Set ``OCR_OBSERVABILITY_STRICT=1`` to surface flush failures as exceptions.
+    """
+    if not is_langfuse_enabled():
+        return
+    try:
+        from langfuse import get_client  # v4 singleton — one shared client
+
+        get_client().flush()
+    except ImportError:
+        # Missing SDK degrades gracefully — tracing is optional.
+        logger.debug("langfuse SDK not installed — flush skipped")
+    except Exception as exc:
+        if os.environ.get("OCR_OBSERVABILITY_STRICT") == "1":
+            raise
+        logger.error("Failed to flush Langfuse client: %s", exc)
+
+
 def log_langfuse_score(
     name: str,
     value: float,
@@ -634,10 +689,14 @@ def log_langfuse_score(
 
     resolved_trace_id = trace_id or _resolve_langfuse_trace_id(handler)
 
-    try:
-        from langfuse import Langfuse
+    # Visibility log: lets you confirm the score will land on the right
+    # trace (or spot a None that would create an orphaned score).
+    logger.info("Langfuse trace_id resolved: %s", resolved_trace_id)
 
-        lf = Langfuse()
+    try:
+        from langfuse import get_client  # v4 singleton — one shared client
+
+        lf = get_client()
         kwargs: dict[str, Any] = {
             "name": name,
             "value": value,
@@ -648,9 +707,20 @@ def log_langfuse_score(
             kwargs["comment"] = comment
 
         lf.create_score(**kwargs)
-        lf.flush()
+        # NOTE: do not flush here — flushing once per run via
+        # flush_langfuse() at run-end (called by app.py/main.py owners).
+    except ImportError:
+        # Missing SDK degrades gracefully — tracing is optional.
+        logger.debug(
+            "langfuse SDK not installed — score '%s' not logged", name
+        )
     except Exception as exc:
-        logger.warning("Failed to log Langfuse score '%s': %s", name, exc)
+        if os.environ.get("OCR_OBSERVABILITY_STRICT") == "1":
+            raise
+        logger.error(
+            "Failed to log Langfuse score '%s'=%.4f (trace_id=%s, comment=%s): %s",
+            name, value, resolved_trace_id, comment, exc,
+        )
 
 
 def update_langfuse_trace(
