@@ -12,5 +12,10 @@ chromadb==1.5.8
 langsmith>=0.7
 langfuse>=4.13,<5
 requests-cache>=1.2
-ragas>=0.3,<0.4
+# ragas 0.4.x keeps the single_turn_score API used by eval_data/ragas_eval.py.
+# langchain-community must stay <0.4.2: ragas imports
+# langchain_community.chat_models.vertexai at startup, and 0.4.2 removed that
+# module (the app then misreports it as "ragas not installed").
+ragas>=0.4,<0.5
+langchain-community>=0.4.1,<0.4.2
 litellm

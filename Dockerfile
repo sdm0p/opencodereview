@@ -49,7 +49,8 @@ RUN pip install --no-cache-dir \
     langchain-groq \
     langfuse \
     langchain-google-genai \
-    "ragas>=0.3,<0.4" \
+    "ragas>=0.4,<0.5" \
+    "langchain-community>=0.4.1,<0.4.2" \
     litellm
 
 # -- Stage 2: Runtime (default) -----------------------------------------------
@@ -73,9 +74,11 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
-# Install ragas+litellm as fallback in case multi-stage COPY missed them
-# Pin ragas to v0.3.x to match the builder stage (code uses single_turn_score API)
-RUN pip install --no-cache-dir "ragas>=0.3,<0.4" litellm
+# Install ragas+litellm as fallback in case multi-stage COPY missed them.
+# ragas 0.4.x keeps the single_turn_score API used by the code; langchain-community
+# must stay <0.4.2 (0.4.2 removed chat_models.vertexai, which ragas imports at
+# startup — previously masked as "ragas not installed").
+RUN pip install --no-cache-dir "ragas>=0.4,<0.5" "langchain-community>=0.4.1,<0.4.2" litellm
 
 # Non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app \

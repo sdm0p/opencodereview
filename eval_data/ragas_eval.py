@@ -349,8 +349,10 @@ def _compute_mmr(
                 f"Answer with exactly one word: YES or NO"
             )
             # Use the wrapped LangChain model for fast synchronous invoke.
-            # LangchainLLMWrapper stores the LangChain model as .llm.
-            raw = llm.llm.invoke(prompt)
+            # LangchainLLMWrapper stores the model as .langchain_llm in ragas
+            # 0.4.x and as .llm in 0.3.x — accept both.
+            langchain_model = getattr(llm, "langchain_llm", None) or getattr(llm, "llm", None)
+            raw = langchain_model.invoke(prompt)
             response_text = raw.content.strip().upper() if hasattr(raw, "content") else str(raw).strip().upper()
             if response_text.startswith("Y"):
                 return 1.0 / rank
