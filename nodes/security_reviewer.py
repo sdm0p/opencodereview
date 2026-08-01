@@ -98,9 +98,9 @@ def security_reviewer_node(state: OpenCodeReviewState) -> dict:
         return {}
 
     try:
-        llm = create_llm()
-    except ValueError:
-        logger.warning("No LLM key set — skipping security review")
+        llm = create_llm(endpoint=state.endpoint or None)
+    except ValueError as exc:
+        logger.warning("LLM unavailable — skipping security review: %s", exc)
         return {}
     structured_llm = llm.with_structured_output(SecurityReview)
 

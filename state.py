@@ -69,6 +69,10 @@ class OpenCodeReviewState(BaseModel):
     diff: Optional[str] = None
     changed_files: list[ChangedFile] = Field(default_factory=list)
 
+    # Custom LLM endpoint chosen for this run (name from OCR_ENDPOINT_* env
+    # configs).  Empty string means "use the built-in default provider".
+    endpoint: str = ""
+
     # Retrieved context: accumulated across parallel retrieval nodes
     context_chunks: Annotated[list[ContextChunk], add] = Field(default_factory=list)
 

@@ -237,8 +237,9 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
     # -- Phase 2: Rule-based (default, fast) or LLM critic (opt-in) ----------
     if USE_LLM_CRITIC:
         try:
-            llm = create_llm()
-        except ValueError:
+            llm = create_llm(endpoint=state.endpoint or None)
+        except ValueError as exc:
+            logger.warning("LLM critic unavailable — using rule-based: %s", exc)
             llm = None
 
         if llm is not None:

@@ -176,7 +176,13 @@ SYNTHETIC_STATE = {
     show_default=True,
     help="Pull request number.",
 )
-def review(repo: str, pr_number: int, smoke: bool) -> None:
+@click.option(
+    "--endpoint", "endpoint_name",
+    default="",
+    show_default=True,
+    help="Name of a configured custom LLM endpoint (see OCR_ENDPOINT_* env vars).",
+)
+def review(repo: str, pr_number: int, smoke: bool, endpoint_name: str) -> None:
     """Run a PR review with human-in-the-loop approval.
 
     By default this runs with a synthetic PR payload for demonstration.
@@ -190,7 +196,7 @@ def review(repo: str, pr_number: int, smoke: bool) -> None:
         if smoke:
             _test_offline(graph)
         else:
-            _run_with_hitl(graph, repo, pr_number)
+            _run_with_hitl(graph, repo, pr_number, endpoint_name)
     finally:
         # Close the graph's SQLite connection (checkpoints persist to disk,
         # so a later resume can open a fresh one) and clean up the DB file.
@@ -202,9 +208,16 @@ def review(repo: str, pr_number: int, smoke: bool) -> None:
         flush_langfuse()
 
 
-def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
+def _run_with_hitl(graph, repo: str, pr_number: int, endpoint_name: str = "") -> None:
     """Run the graph on a real PR — fetches data from GitHub, pauses for
-    human approval, then posts findings back as PR comments."""
+    human approval, then posts findings back as PR comments.
+
+    Parameters
+    ----------
+    endpoint_name : str
+        Optional custom LLM endpoint name (``OCR_ENDPOINT_*``) to run the
+        reviewers on.  Empty string uses the built-in default provider.
+    """
     thread_id = str(uuid.uuid4())
     trace_name = f"opencodereview/review/{repo}#{pr_number}"
     tags = ["cli", repo]
@@ -243,6 +256,8 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
             "repo": repo,
             "pr_number": pr_number,
         }
+        if endpoint_name:
+            initial_state["endpoint"] = endpoint_name
 
     with langfuse_trace(
         trace_name=trace_name,
@@ -343,6 +358,7 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                         query=query,
                         retrieved_contexts=contexts,
                         answer=answer_text,
+                        endpoint=endpoint_name or None,
                     )
 
                     # Log RAGAS scores with the explicitly captured trace_id
@@ -522,6 +538,21 @@ def doctor() -> None:
     h = HealthStatus()
     for comp, status in h.summary().items():
         click.echo(f"  {comp}: {status}")
+    click.echo()
+
+    # ── Custom endpoints ────────────────────────────────────────────────
+    click.echo("🔌 Custom Endpoints")
+    from endpoints import discover_endpoints
+
+    eps = discover_endpoints()
+    if eps:
+        for ep in eps:
+            click.echo(
+                f"  {ep.describe()}"
+                + (" ✅" if ep.api_key else " ❌ missing key")
+            )
+    else:
+        click.echo("  None configured — set OCR_ENDPOINT_* env vars to add one")
     click.echo()
 
     # ── Connectivity tests ─────────────────────────────────────────────

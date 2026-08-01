@@ -11,6 +11,7 @@ On Hugging Face Spaces:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from observability import (
     check_groq_connectivity,
     check_langfuse_connectivity,
 )
+from endpoints import discover_endpoints
 from state import Verdict
 
 import subprocess
@@ -91,8 +93,15 @@ def _init_observability_ui() -> None:
         logger.info("Observability: Langfuse enabled for Gradio UI")
 
 
-def _build_and_stream(repo: str, pr_number: int) -> tuple:
-    """Build the graph, stream up to the interrupt, and return state + config."""
+def _build_and_stream(repo: str, pr_number: int, endpoint_name: str = "") -> tuple:
+    """Build the graph, stream up to the interrupt, and return state + config.
+
+    Parameters
+    ----------
+    endpoint_name : str
+        Optional name of a configured custom LLM endpoint
+        (``OCR_ENDPOINT_*``).  Empty string uses the built-in provider.
+    """
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
     trace_name = f"opencodereview/review/{repo}#{pr_number}"
@@ -135,6 +144,8 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
         try:
             t0 = time.time()
             initial = {"repo": repo, "pr_number": pr_number}
+            if endpoint_name:
+                initial["endpoint"] = endpoint_name
             for event in graph.stream(initial, config):
                 for node_name in event:
                     label = NODE_LABELS.get(node_name, node_name)
@@ -199,6 +210,7 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                     query=query,
                     retrieved_contexts=contexts,
                     answer=answer_text,
+                    endpoint=endpoint_name or None,
                 )
 
                 # Log RAGAS scores with the explicitly captured trace_id
@@ -277,9 +289,9 @@ def _format_findings_table(findings: list) -> str:
 
 
 def _format_verdict(verdict: Verdict | None) -> str:
-    """Build a verdict summary card."""
+    """Build a verdict summary card with a score bar and severity chips."""
     if verdict is None:
-        return '<p style="color:var(--text-muted)">No verdict produced.</p>'
+        return '<p class="muted">No verdict produced.</p>'
 
     icon = RECOMMENDATION_ICONS.get(verdict.recommendation, "📋")
     color = (
@@ -287,20 +299,36 @@ def _format_verdict(verdict: Verdict | None) -> str:
         else "#dc2626" if verdict.recommendation == "block"
         else "#ea580c"
     )
+    pct = max(0, min(100, int(verdict.overall_score * 10)))
+
+    chips = []
+    if verdict.critical_count:
+        chips.append(
+            f'<span class="sev-chip" style="color:#dc2626;border-color:#dc262644;background:#dc262611">'
+            f"critical × {verdict.critical_count}</span>"
+        )
+    if verdict.high_count:
+        chips.append(
+            f'<span class="sev-chip" style="color:#ea580c;border-color:#ea580c44;background:#ea580c11">'
+            f"high × {verdict.high_count}</span>"
+        )
+    chips_html = (
+        f'<div class="chips-row" style="margin-top:10px">' + "".join(chips) + "</div>"
+        if chips else ""
+    )
 
     return (
-        f'<div style="border:1px solid var(--border-color);border-radius:12px;'
-        f'padding:16px 20px;background:var(--bg-card)">'
-        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">'
-        f'<span style="font-size:2em">{icon}</span>'
-        f'<span style="font-size:1.4em;font-weight:700;color:{color}">'
-        f"{verdict.recommendation.upper()}</span>"
-        f'<span style="margin-left:auto;font-size:1.2em;font-weight:600;'
-        f'color:var(--text-primary)">'
-        f"Score: {verdict.overall_score}/10</span>"
-        f"</div>"
-        f"<p style='margin:0;color:var(--text-secondary)'>{verdict.summary}</p>"
-        f"</div>"
+        '<div class="ocr-card verdict-card" '
+        f'style="border-left-color:{color}">'
+        '<div class="verdict-head">'
+        f'<span class="verdict-icon">{icon}</span>'
+        f'<span class="verdict-reco" style="color:{color}">{verdict.recommendation.upper()}</span>'
+        f'<span class="verdict-score">Score <b>{verdict.overall_score:.1f}</b>/10</span>'
+        "</div>"
+        f'<div class="score-track"><div class="score-fill" style="width:{pct}%;background:{color}"></div></div>'
+        f'<p class="verdict-summary">{verdict.summary}</p>'
+        + chips_html
+        + "</div>"
     )
 
 
@@ -334,46 +362,52 @@ def _format_ragas_scores(scores: dict[str, float | None]) -> str:
         else:
             return "#dc2626"
 
-    bars: list[str] = []
+    rows: list[str] = []
+    failed = 0
     for key, value in scores.items():
-        if value is None:
-            continue
         label = RAGAS_METRIC_LABELS.get(key, key.replace("_", " ").title())
         tooltip = RAGAS_METRIC_TOOLTIPS.get(key, "")
+        tip_html = (
+            f'<span class="tip" title="{tooltip}">ℹ️</span>' if tooltip else ""
+        )
+        if value is None:
+            failed += 1
+            rows.append(
+                f'<div class="metric-row">'
+                f'<span class="metric-label">{label} {tip_html}</span>'
+                f'<span class="metric-value muted">N/A — failed</span>'
+                f"</div>"
+            )
+            continue
         color = _score_color(value)
         pct = int(value * 100)
-        bars.append(
-            f'<div style="margin-bottom:12px">'
-            f'<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
-            f'<span style="font-weight:500;color:var(--text-secondary)">'
-            f'{label}'
-            + (f'<span style="margin-left:4px;cursor:help;font-size:0.85em" '
-               f'title="{tooltip}">ℹ️</span>' if tooltip else '')
-            + f'</span>'
-            f'<span style="font-weight:700;color:{color}">{value:.3f}</span>'
-            f'</div>'
-            f'<div style="height:8px;background:var(--spinner-track);border-radius:4px;overflow:hidden">'
-            f'<div style="height:100%;width:{pct}%;background:{color};'
-            f'border-radius:4px;transition:width 0.6s ease"></div>'
-            f'</div>'
-            f'</div>'
+        rows.append(
+            f'<div class="metric-row">'
+            f'<span class="metric-label">{label} {tip_html}</span>'
+            f'<span class="metric-value" style="color:{color}">{value:.3f}</span>'
+            f"</div>"
+            f'<div class="metric-track"><div class="metric-fill" style="width:{pct}%;background:{color}"></div></div>'
+        )
+
+    note = ""
+    if failed:
+        note = (
+            '<p class="muted small" style="margin:10px 0 0">'
+            f"{failed} metric(s) failed (likely LLM rate-limited) and are shown as N/A."
+            "</p>"
         )
 
     return (
-        f'<div style="border:1px solid var(--border-color);border-radius:12px;'
-        f'padding:16px 20px;margin-top:12px;background:var(--bg-card)">'
-        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">'
-        f'<span style="font-size:1.1em">📊</span>'
-        f'<span style="font-weight:600;color:var(--text-primary)">'
-        f'Retrieval Quality (RAGAS)</span>'
-        f'</div>'
-        + "".join(bars)
-        + f'</div>'
+        '<div class="ocr-card">'
+        '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+        + "".join(rows)
+        + note
+        + "</div>"
     )
 
 
 def _format_findings_count(findings: list) -> str:
-    """Build a compact summary count per severity."""
+    """Build a compact summary count per severity as pill chips."""
     counts: dict[str, int] = {}
     for f in findings:
         counts[f.severity.value] = counts.get(f.severity.value, 0) + 1
@@ -383,10 +417,104 @@ def _format_findings_count(findings: list) -> str:
         if counts.get(sev, 0) > 0:
             color = SEVERITY_COLORS.get(sev, "#666")
             parts.append(
-                f'<span style="color:{color};font-weight:600">'
-                f"{sev}: {counts[sev]}</span>"
+                f'<span class="sev-chip" style="color:{color};border-color:{color}44;background:{color}11">'
+                f"{sev} × {counts[sev]}</span>"
             )
-    return "  |  ".join(parts) if parts else '<span style="color:var(--text-muted)">No issues</span>'
+    return (
+        '<div class="chips-row">'
+        + ("".join(parts) if parts else '<span class="muted">No issues</span>')
+        + "</div>"
+    )
+
+
+def _format_run_summary(
+    repo: str, pr_number: int, endpoint_name: str, duration: float, cost_summary: str
+) -> str:
+    """Build a compact run-summary card shown above the results."""
+    endpoint_display = html.escape(endpoint_name or "built-in default")
+    return (
+        '<div class="ocr-card" style="margin-top:12px">'
+        '<div class="run-summary">'
+        f'<span>📦 <b>{html.escape(repo)}</b>#{pr_number}</span>'
+        f'<span>🤖 <b>{endpoint_display}</b></span>'
+        f'<span>⏱️ <b>{duration:.1f}s</b></span>'
+        f'<span>{cost_summary}</span>'
+        "</div>"
+        "</div>"
+    )
+
+
+def _probe_endpoint(ep) -> tuple[bool, str]:
+    """Quick connectivity probe for a custom endpoint (no LLM generation)."""
+    import urllib.request as _ur
+
+    if ep.provider == "google":
+        try:
+            from google import genai
+            client = genai.Client(api_key=ep.api_key)
+            list(client.models.list())
+            return True, "models.list OK"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"[:140]
+
+    if ep.provider == "anthropic":
+        base = (ep.base_url or "https://api.anthropic.com/v1").rstrip("/")
+        candidates = [f"{base}/models"]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1/models")
+    else:  # openai-compatible
+        base = (ep.base_url or "https://api.openai.com/v1").rstrip("/")
+        candidates = [f"{base}/models"]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1/models")
+
+    last_err = "no response"
+    for url in candidates:
+        try:
+            if ep.provider == "anthropic":
+                req = _ur.Request(
+                    url,
+                    headers={
+                        "x-api-key": ep.api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                )
+            else:
+                req = _ur.Request(
+                    url, headers={"Authorization": f"Bearer {ep.api_key}"}
+                )
+            with _ur.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return True, f"HTTP 200 · {url}"
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+    return False, last_err[:140]
+
+
+def test_endpoints() -> str:
+    """Probe every configured endpoint and render status cards."""
+    eps = discover_endpoints()
+    if not eps:
+        return (
+            '<p class="muted">No custom endpoints configured — add '
+            'OCR_ENDPOINT_* secrets first.</p>'
+        )
+
+    cards = []
+    for ep in eps:
+        ok, detail = _probe_endpoint(ep)
+        status_color = "#16a34a" if ok else "#dc2626"
+        cards.append(
+            f'<div class="endpoint-card">'
+            f'<div class="endpoint-name">{ep.name}'
+            f'<span class="endpoint-badge">{ep.provider}</span></div>'
+            f'<div class="endpoint-meta"><code>{ep.model}</code>'
+            f' · {ep.base_url or "default URL"} · key {ep.masked_key}</div>'
+            f'<div class="endpoint-meta" style="color:{status_color};font-weight:700">'
+            f'{"✅ reachable" if ok else "❌ unreachable"} — {detail}</div>'
+            f'</div>'
+        )
+    return '<div>' + "".join(cards) + '</div>'
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -414,35 +542,33 @@ def _get_deploy_info() -> tuple[str, str]:
 # _prune_db replaced with direct _cleanup_db() calls below
 
 
-def run_review(repo: str, pr_number: int, progress=gr.Progress()):
+def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.Progress()):
     """Run the review pipeline up to human-in-the-loop interrupt."""
     if not repo or "/" not in repo:
-        yield [None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
+        yield [None, None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
         return
 
     _cleanup_db()
 
     progress(0.1, desc="Building graph…")
 
+    t0 = time.time()
     try:
-        state, config, cost_summary, ragas_scores = _build_and_stream(repo.strip(), pr_number)
+        state, config, cost_summary, ragas_scores = _build_and_stream(
+            repo.strip(), pr_number, endpoint_name,
+        )
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
-        yield [
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(visible=True),
-            gr.update(visible=True, value=f"❌ Review failed: {exc}"),
-            None, None, None, None, None,
-            gr.update(visible=False),
-        ]
+        yield ([None, None, None, None, None, None], f"❌ Review failed: {exc}")
         return
+
+    duration = time.time() - t0
 
     tasks = state.tasks
     values = state.values
 
     if not tasks:
-        yield [None, None, None, None, None], "ℹ️ Review completed without findings."
+        yield [None, None, None, None, None, None], "ℹ️ Review completed without findings."
         return
 
     verdict: Verdict | None = values.get("verdict")
@@ -454,15 +580,17 @@ def run_review(repo: str, pr_number: int, progress=gr.Progress()):
     ragas_html = _format_ragas_scores(ragas_scores)
     findings_html = _format_findings_table(findings)
     count_html = _format_findings_count(findings)
-    # Append cost info to count display
-    count_html += f'<p style="margin-top:8px;font-size:0.85em;color:var(--text-muted)">{cost_summary}</p>'
     # Strip non-serializable callbacks before saving config to state
     config_json = json.dumps(
         {k: v for k, v in config.items() if k != "callbacks"}
     )
 
+    run_summary_html = _format_run_summary(
+        repo.strip(), pr_number, endpoint_name, duration, cost_summary,
+    )
+
     yield (
-        [verdict_html, findings_html, count_html, ragas_html, config_json],
+        [run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json],
         None,
     )
 
@@ -585,103 +713,168 @@ def run_smoke(progress=gr.Progress()):
 CSS = """
 /* ── CSS Custom Properties (light mode) ───────────────────────────── */
 :root {
-    --bg-card: #f9fafb;
-    --bg-table-header: #f3f4f6;
-    --border-color: #e5e7eb;
-    --text-primary: #111827;
-    --text-secondary: #4b5563;
-    --text-muted: #6b7280;
-    --text-footer: #9ca3af;
-    --spinner-track: #e5e7eb;
+    --bg-page: #f1f5f9;
+    --bg-card: #ffffff;
+    --bg-card-alt: #f8fafc;
+    --bg-table-header: #f1f5f9;
+    --border-color: #e2e8f0;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --text-footer: #94a3b8;
+    --spinner-track: #e2e8f0;
+    --accent: #6366f1;
+    --accent-soft: rgba(99, 102, 241, 0.12);
+    --radius: 14px;
+    --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 10px 30px rgba(15, 23, 42, 0.06);
 }
 
 /* ── Dark Mode Overrides ─────────────────────────────────────────── */
 body.dark-mode {
-    --bg-card: #1f2937;
-    --bg-table-header: #374151;
-    --border-color: #4b5563;
-    --text-primary: #f3f4f6;
-    --text-secondary: #d1d5db;
-    --text-muted: #9ca3af;
-    --text-footer: #6b7280;
-    --spinner-track: #4b5563;
+    --bg-page: #0b1220;
+    --bg-card: #131c31;
+    --bg-card-alt: #0f172a;
+    --bg-table-header: #1e293b;
+    --border-color: #2b3a55;
+    --text-primary: #f1f5f9;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --text-footer: #64748b;
+    --spinner-track: #334155;
+    --accent: #818cf8;
+    --accent-soft: rgba(129, 140, 248, 0.15);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.3);
 }
 body.dark-mode .gradio-container {
-    background-color: #111827 !important;
+    background: radial-gradient(1200px 500px at 20% -10%, #1e1b4b33, transparent 60%),
+                radial-gradient(1000px 400px at 90% 10%, #17255433, transparent 55%),
+                var(--bg-page) !important;
 }
 body.dark-mode .gr-box,
 body.dark-mode .tabs,
 body.dark-mode .tab-nav {
-    background-color: #1f2937 !important;
-    border-color: #4b5563 !important;
+    background-color: var(--bg-card) !important;
+    border-color: var(--border-color) !important;
 }
-body.dark-mode input, body.dark-mode textarea {
-    background-color: #374151 !important;
-    color: #f3f4f6 !important;
-    border-color: #4b5563 !important;
+body.dark-mode input, body.dark-mode textarea, body.dark-mode select {
+    background-color: var(--bg-card-alt) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
 }
-body.dark-mode label {
-    color: #d1d5db !important;
-}
-body.dark-mode button:not(.lg) {
-    color: #f3f4f6 !important;
-}
-body.dark-mode .footer {
-    color: var(--text-footer) !important;
-}
-body.dark-mode details summary {
-    color: #d1d5db !important;
-}
-body.dark-mode [data-testid="block-info"] {
-    color: #d1d5db !important;
-}
+body.dark-mode label { color: var(--text-secondary) !important; }
+body.dark-mode button:not(.lg) { color: var(--text-primary) !important; }
+body.dark-mode .footer { color: var(--text-footer) !important; }
+body.dark-mode details summary { color: var(--text-secondary) !important; }
+body.dark-mode [data-testid="block-info"] { color: var(--text-muted) !important; }
 
-/* ── Global Styles ────────────────────────────────────────────────── */
-.gr-container { max-width: 960px; margin: 0 auto; }
-h1 { display: flex; align-items: center; gap: 10px; }
-.footer { text-align: center; color: var(--text-footer); font-size: 0.85em; padding: 20px 0; }
+/* ── Global ──────────────────────────────────────────────────────── */
+.gradio-container {
+    background: radial-gradient(1200px 500px at 20% -10%, #eef2ff66, transparent 60%),
+                radial-gradient(1000px 400px at 90% 10%, #e0f2fe55, transparent 55%),
+                var(--bg-page) !important;
+}
+.gr-container { max-width: 980px; margin: 0 auto; }
+.footer { text-align: center; color: var(--text-footer); font-size: 0.85em; padding: 22px 0; }
 details { margin-top: 8px; }
-details summary { cursor: pointer; color: #4b5563; font-weight: 500; }
+details summary { cursor: pointer; color: var(--text-secondary); font-weight: 500; }
+code { background: var(--bg-card-alt); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
+.muted { color: var(--text-muted) !important; }
+.small { font-size: 0.85em; }
 
-/* ── Theme toggle ─────────────────────────────────────────────────── */
+/* ── Hero ────────────────────────────────────────────────────────── */
+.hero { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
+.hero-icon {
+    font-size: 2.2em; width: 58px; height: 58px; display: flex; align-items: center;
+    justify-content: center; border-radius: 16px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35);
+}
+.hero-title { margin: 0; font-size: 1.6em; font-weight: 800; letter-spacing: -0.02em; color: var(--text-primary); }
+.hero-sub { margin: 2px 0 0; color: var(--text-muted); font-size: 0.95em; }
+
+/* ── Cards ───────────────────────────────────────────────────────── */
+.ocr-card {
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: var(--radius); padding: 16px 20px; margin-top: 12px;
+    box-shadow: var(--shadow);
+}
+.card-title { font-weight: 700; color: var(--text-primary); margin-bottom: 12px; font-size: 1.02em; }
+.chips-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* ── Chips / badges ──────────────────────────────────────────────── */
+.key-chip {
+    display: inline-block; padding: 3px 12px; border-radius: 999px;
+    font-size: 0.85em; font-weight: 600; border: 1px solid;
+}
+.key-chip.ok { color: #16a34a; background: #16a34a14; border-color: #16a34a44; }
+.key-chip.no { color: var(--text-muted); background: var(--bg-card-alt); border-color: var(--border-color); }
+.sev-chip {
+    display: inline-block; padding: 3px 12px; border-radius: 999px;
+    font-size: 0.85em; font-weight: 700; border: 1px solid;
+}
+
+/* ── Endpoint cards ──────────────────────────────────────────────── */
+.endpoint-card {
+    border: 1px solid var(--border-color); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 8px; background: var(--bg-card-alt);
+}
+.endpoint-name { font-weight: 700; color: var(--text-primary); display: flex; gap: 8px; align-items: center; }
+.endpoint-badge {
+    font-size: 0.72em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 2px 8px; border-radius: 999px; color: var(--accent);
+    background: var(--accent-soft); border: 1px solid #6366f144;
+}
+.endpoint-meta { margin-top: 4px; font-size: 0.88em; color: var(--text-secondary); }
+
+/* ── Run summary ─────────────────────────────────────────────────── */
+.run-summary { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; font-size: 0.92em; color: var(--text-secondary); }
+.run-summary b { color: var(--text-primary); }
+
+/* ── Verdict ─────────────────────────────────────────────────────── */
+.verdict-card { border-left: 5px solid var(--accent); }
+.verdict-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.verdict-icon { font-size: 1.8em; }
+.verdict-reco { font-size: 1.35em; font-weight: 800; letter-spacing: 0.02em; }
+.verdict-score { margin-left: auto; font-size: 1.05em; color: var(--text-secondary); }
+.verdict-score b { color: var(--text-primary); font-size: 1.25em; }
+.verdict-summary { margin: 10px 0 0; color: var(--text-secondary); line-height: 1.55; }
+.score-track { height: 10px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; margin-top: 4px; }
+.score-fill { height: 100%; border-radius: 999px; transition: width 0.7s ease; }
+
+/* ── RAGAS metrics ───────────────────────────────────────────────── */
+.metric-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0 4px; }
+.metric-label { font-weight: 600; color: var(--text-secondary); font-size: 0.93em; }
+.metric-value { font-weight: 800; font-size: 0.98em; }
+.metric-track { height: 8px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; }
+.metric-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease; }
+.tip { cursor: help; font-size: 0.85em; }
+
+/* ── Findings table ──────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+thead tr { background: var(--bg-table-header); border-bottom: 2px solid var(--border-color); }
+th { padding: 10px 12px; text-align: left; color: var(--text-primary); }
+td { padding: 10px 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); vertical-align: top; }
+tbody tr:hover { background: var(--bg-card-alt); }
+
+/* ── Theme toggle ────────────────────────────────────────────────── */
 #theme-toggle-btn {
-    float: right;
-    margin-top: 24px !important;
-    background: transparent !important;
-    border: 1px solid #d1d5db !important;
-    border-radius: 8px !important;
-    padding: 4px 10px !important;
-    font-size: 1.1em !important;
-    min-width: 44px !important;
-    transition: all 0.2s ease !important;
-    box-shadow: none !important;
+    float: right; margin-top: 18px !important; background: transparent !important;
+    border: 1px solid var(--border-color) !important; border-radius: 10px !important;
+    padding: 4px 10px !important; font-size: 1.1em !important; min-width: 44px !important;
+    transition: all 0.2s ease !important; box-shadow: none !important;
 }
-#theme-toggle-btn:hover {
-    background: #f3f4f6 !important;
-    border-color: #9ca3af !important;
-}
-body.dark-mode #theme-toggle-btn {
-    border-color: #4b5563 !important;
-    color: #f3f4f6 !important;
-}
-body.dark-mode #theme-toggle-btn:hover {
-    background: #374151 !important;
-}
+#theme-toggle-btn:hover { background: var(--bg-card-alt) !important; border-color: var(--text-muted) !important; }
 
-/* ── Loading spinner ──────────────────────────────────────────────── */
+/* ── Loading spinner ─────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-spinner {
-    display: flex; align-items: center; gap: 12px;
-    padding: 24px 0; justify-content: center;
+    display: flex; align-items: center; gap: 12px; padding: 24px 0; justify-content: center;
 }
 .loading-spinner .spinner {
     width: 24px; height: 24px; border: 3px solid var(--spinner-track);
-    border-top-color: #6366f1; border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
 }
-.loading-spinner .label {
-    color: var(--text-muted); font-size: 0.95em;
-}
+.loading-spinner .label { color: var(--text-muted); font-size: 0.95em; }
 """
 
 JS_RESTORE_THEME = """
@@ -712,15 +905,29 @@ try:
 except Exception as exc:
     logger.warning("Observability initialisation failed (non-fatal): %s", exc)
 
-with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="OpenCodeReview") as demo:
     demo.load(js=JS_RESTORE_THEME)
+
+    # Discover configured endpoints once — reused by the hero chip, the
+    # dropdown, and the health accordion.
+    _configured_endpoints = discover_endpoints()
+    _endpoint_choices = [ep.name for ep in _configured_endpoints]
 
     with gr.Row():
         with gr.Column(scale=4):
             gr.HTML(
-                '<h1>🔍 OpenCodeReview</h1>'
-                '<p style="color:var(--text-muted);margin-top:-8px">'
-                'AI-powered PR review with human-in-the-loop approval</p>'
+                '<div class="hero">'
+                '<div class="hero-icon">🔍</div>'
+                '<div>'
+                '<h1 class="hero-title">OpenCodeReview</h1>'
+                '<p class="hero-sub">AI-powered PR review with human-in-the-loop approval</p>'
+                f'<div class="chips-row" style="margin-top:8px">'
+                f'<span class="key-chip ok">⚡ {len(_configured_endpoints)} custom endpoint'
+                f'{"s" if len(_configured_endpoints) != 1 else ""}</span>'
+                '<span class="key-chip" style="color:var(--text-muted);background:var(--bg-card-alt);border-color:var(--border-color)">🔐 BYO keys</span>'
+                '</div>'
+                '</div>'
+                '</div>'
             )
         with gr.Column(scale=1, min_width=60):
             theme_toggle = gr.Button("🌙", elem_id="theme-toggle-btn", size="sm", min_width=50, visible=True)
@@ -747,6 +954,20 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
             )
 
         with gr.Row():
+            endpoint_input = gr.Dropdown(
+                choices=[""] + _endpoint_choices,
+                value="",
+                label="LLM Endpoint",
+                info=(
+                    "Run the review on a custom model (OpenAI-compatible / "
+                    "Anthropic / Google). Empty = built-in default."
+                    if _endpoint_choices
+                    else "No custom endpoints configured — set OCR_ENDPOINT_* secrets to add one."
+                ),
+                scale=3,
+            )
+
+        with gr.Row():
             run_btn = gr.Button("▶ Run Review", variant="primary", size="lg", scale=2)
             cancel_btn = gr.Button("⏹ Cancel", variant="stop", size="lg", visible=False)
 
@@ -758,6 +979,7 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
         status_msg = gr.Markdown(visible=False)
 
         with gr.Column(visible=False) as results_panel:
+            run_summary_display = gr.HTML()
             verdict_display = gr.HTML()
             count_display = gr.HTML()
             findings_display = gr.HTML()
@@ -778,7 +1000,9 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                 gr.update(visible=True, variant="stop"),
                 gr.update(visible=False),
                 gr.update(visible=False, value=""),
-                *[None, None, None, None, None],
+                gr.update(value=""),
+                *[None, None, None, None],
+                None,
                 gr.update(visible=False),
             ]
 
@@ -789,16 +1013,19 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
                         gr.update(visible=False),
                         gr.update(visible=True),
                         gr.update(visible=True, value=err),
-                        *[None, None, None, None, None],
+                        gr.update(value=""),
+                        *[None, None, None, None],
+                        None,
                         gr.update(visible=False),
                     ]
                 else:
-                    verdict_html, findings_html, count_html, ragas_html, config_json = result
+                    run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json = result
                     yield [
                         gr.update(visible=False),
                         gr.update(visible=False),
                         gr.update(visible=True),
                         gr.update(visible=False),
+                        gr.update(value=run_summary_html),
                         gr.update(value=verdict_html),
                         gr.update(value=count_html),
                         gr.update(value=findings_html),
@@ -809,12 +1036,13 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
 
         run_event = run_btn.click(
             fn=on_run_click,
-            inputs=[repo_input, pr_input],
+            inputs=[repo_input, pr_input, endpoint_input],
             outputs=[
                 loading_box,
                 cancel_btn,
                 run_btn,
                 status_msg,
+                run_summary_display,
                 verdict_display,
                 count_display,
                 findings_display,
@@ -932,8 +1160,6 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
         gemini_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
         groq_ok = bool(os.environ.get("GROQ_API_KEY", "").strip())
         gh_ok = bool(os.environ.get("GITHUB_TOKEN", "").strip())
-        ls_ok = h.langsmith
-        lf_ok = h.langfuse
         lines = [
             f"<li>GEMINI_API_KEY: {'✅ Set' if gemini_ok else '❌ Not set'}</li>",
             f"<li>GROQ_API_KEY: {'✅ Set' if groq_ok else '❌ Not set'}</li>",
@@ -941,7 +1167,38 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
             f"<li>LangSmith: {health_data['LangSmith']}</li>",
             f"<li>Langfuse: {health_data['Langfuse']}</li>",
         ]
-        gr.HTML(f"<ul>" + "".join(lines) + "</ul>")
+        gr.HTML("<ul>" + "".join(lines) + "</ul>")
+
+        gr.HTML(
+            '<div class="card-title" style="margin:14px 0 8px">⚡ Custom LLM Endpoints</div>'
+        )
+        if _configured_endpoints:
+            endpoint_cards = "".join(
+                f'<div class="endpoint-card">'
+                f'<div class="endpoint-name">{html.escape(ep.name)}'
+                f'<span class="endpoint-badge">{ep.provider}</span>'
+                + (
+                    '<span class="endpoint-badge" style="color:#dc2626;background:#dc262611;border-color:#dc262644">missing key</span>'
+                    if not ep.api_key else ""
+                )
+                + '</div>'
+                f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+                f' · {html.escape(ep.base_url or "default URL")} · key {ep.masked_key}</div>'
+                f'</div>'
+                for ep in _configured_endpoints
+            )
+            gr.HTML(f'<div>{endpoint_cards}</div>')
+        else:
+            gr.HTML(
+                '<p class="muted small">None configured — set '
+                '<code>OCR_ENDPOINT_1_NAME</code> / <code>_TYPE</code> / '
+                '<code>_API_KEY</code> / <code>_BASE_URL</code> / <code>_MODEL</code> '
+                'as Space secrets to add one.</p>'
+            )
+        with gr.Row():
+            test_endpoints_btn = gr.Button("🔌 Test endpoint connectivity", size="sm", variant="secondary")
+        endpoint_test_out = gr.HTML()
+        test_endpoints_btn.click(fn=test_endpoints, outputs=[endpoint_test_out])
 
     # ── Footer ─────────────────────────────────────────────────────────
     _commit, _ts = _get_deploy_info()
@@ -956,10 +1213,13 @@ with gr.Blocks(css=CSS, title="OpenCodeReview", theme=gr.themes.Soft()) as demo:
 
 def main() -> None:
     port = int(os.environ.get("PORT", 7860))
+    # Gradio 6: theme/css moved from the Blocks constructor to launch().
     demo.queue(max_size=10).launch(
         server_name="0.0.0.0",
         server_port=port,
         share=False,
+        theme=gr.themes.Soft(),
+        css=CSS,
     )
 
 

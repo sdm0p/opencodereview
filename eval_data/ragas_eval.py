@@ -58,24 +58,32 @@ def _check_ragas() -> bool:
     return _RAGAS_AVAILABLE
 
 
-def _get_evaluator_llm():
+def _get_evaluator_llm(endpoint: Optional[str] = None):
     """Return a RAGAS-compatible LLM, reusing the project's LLM factory.
 
-    RAGAS scoring is routed to **Groq first** (falling back to Gemini)
-    because scoring fires many LLM calls per review, and the Gemini free
-    tier (15 req/min) is already shared with the main review pipeline —
-    using Groq's separate quota pool avoids the 429 rate-limit failures
-    that used to zero out the metrics.
+    Priority:
+    1. **Custom endpoint** — when *endpoint* names a configured
+       ``OCR_ENDPOINT_*`` config, it is used (any provider the user added).
+    2. **Groq** (``llama-3.3-70b-versatile``) via ``GROQ_API_KEY``
+    3. **Google Gemini** (``gemini-3.1-flash-lite``) via ``GEMINI_API_KEY``
 
-    Follows this priority:
-    1. Groq (``llama-3.3-70b-versatile``) via ``GROQ_API_KEY``
-    2. Google Gemini (``gemini-3.1-flash-lite``) via ``GEMINI_API_KEY``
+    Groq is preferred over Gemini because scoring fires many LLM calls per
+    review and the Gemini free tier (15 req/min) is already shared with the
+    main review pipeline — using Groq's separate quota pool avoids the 429
+    rate-limit failures that used to zero out the metrics.
 
     RAGAS v0.3+ uses ``LangchainLLMWrapper`` to wrap LangChain models.
     """
     from ragas.llms import LangchainLLMWrapper
 
     try:
+        if endpoint:
+            from llm_factory import create_llm
+
+            llm = create_llm(endpoint=endpoint, temperature=0)
+            logger.info("RAGAS evaluator: using custom endpoint %s", endpoint)
+            return LangchainLLMWrapper(llm)
+
         from llm_factory import _get_groq_chat, _get_gemini_chat
 
         llm = _get_groq_chat(temperature=0)
@@ -110,6 +118,7 @@ def compute_ragas_retrieval_scores(
     retrieved_contexts: list[str],
     ground_truth: Optional[str] = None,
     answer: Optional[str] = None,
+    endpoint: Optional[str] = None,
 ) -> dict[str, float | None]:
     """Compute RAGAS retrieval & generation quality metrics.
 
@@ -138,6 +147,10 @@ def compute_ragas_retrieval_scores(
     answer : str or None
         The generated answer (e.g. concatenated review findings / verdict).
         Required for ``faithfulness`` and ``answer_relevancy``.
+    endpoint : str or None
+        Optional name of a configured custom LLM endpoint
+        (``OCR_ENDPOINT_*``) to score with.  ``None`` uses the built-in
+        Groq → Gemini priority.
 
     Returns
     -------
@@ -170,7 +183,7 @@ def compute_ragas_retrieval_scores(
 
     from ragas.dataset_schema import SingleTurnSample
 
-    llm = _get_evaluator_llm()
+    llm = _get_evaluator_llm(endpoint=endpoint)
     scores: dict[str, float | None] = {}
 
     # ── Context Precision (reference-free) ───────────────────────────

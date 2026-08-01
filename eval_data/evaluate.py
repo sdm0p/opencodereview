@@ -197,6 +197,7 @@ def _run_graph_for_pr(
         "pr_number": entry["pr_number"],
         "diff": entry.get("diff", ""),
         "changed_files": changed_files,
+        "endpoint": entry.get("endpoint", ""),
     }
 
     trace_id: Optional[str] = None
@@ -400,6 +401,11 @@ def main() -> None:
         help="Compute RAGAS retrieval & generation metrics (context_precision, context_recall, "
              "faithfulness, answer_relevancy, mmr) in addition to standard precision/recall/F1",
     )
+    parser.add_argument(
+        "--endpoint", default="",
+        help="Name of a configured custom LLM endpoint (see OCR_ENDPOINT_* env vars) "
+             "to run the reviewers on.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -436,6 +442,13 @@ def main() -> None:
 
     if args.max_prs:
         entries = entries[: args.max_prs]
+
+    # Apply the CLI endpoint to every entry so the graph reviewers run on it
+    # too (not just RAGAS scoring).
+    if args.endpoint:
+        for entry in entries:
+            if not entry.get("endpoint"):
+                entry["endpoint"] = args.endpoint
 
     # --- Build graph ---
     print("Building graph ... ", end="", flush=True)
@@ -504,6 +517,7 @@ def main() -> None:
                     retrieved_contexts=contexts,
                     ground_truth=gt_text or None,
                     answer=answer_text,
+                    endpoint=entry.get("endpoint") or args.endpoint or None,
                 )
                 metrics.update(ragas_scores)
                 print(

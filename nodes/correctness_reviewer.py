@@ -121,9 +121,9 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
 
     # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
     try:
-        llm = create_llm()
-    except ValueError:
-        logger.warning("No LLM key set — skipping correctness review")
+        llm = create_llm(endpoint=state.endpoint or None)
+    except ValueError as exc:
+        logger.warning("LLM unavailable — skipping correctness review: %s", exc)
         return {}
     structured_llm = llm.with_structured_output(CorrectnessReview)
 
