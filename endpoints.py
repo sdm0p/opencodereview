@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -81,7 +82,85 @@ def mask_key(api_key: str) -> str:
     return api_key[:6] + "…" + api_key[-4:]
 
 
-def discover_endpoints() -> list[EndpointConfig]:
+# ── Runtime (UI-added) endpoints ────────────────────────────────────────────
+# Endpoints entered in the web UI are kept in-memory only: they are never
+# written to disk and disappear when the app process restarts.  They are
+# layered on top of the env-var endpoints below, so both are available and
+# a UI-added endpoint with the same name as an env one takes precedence.
+_session_endpoints: dict[str, EndpointConfig] = {}
+# Guards the registry above — Gradio serves events from a thread pool, so
+# concurrent visitors may register/clear endpoints at the same time.
+_session_lock = threading.Lock()
+
+
+def register_endpoint(
+    name: str,
+    provider: str = "openai",
+    api_key: str = "",
+    base_url: Optional[str] = None,
+    model: str = "",
+) -> EndpointConfig:
+    """Register (or replace) an endpoint added at runtime via the UI.
+
+    Validation is strict so a review never runs on a half-configured entry:
+
+    * ``name`` and ``model`` are required
+    * ``api_key`` is required (use a placeholder such as ``dummy`` for
+      keyless local servers like Ollama)
+    * ``provider`` must be one of :data:`SUPPORTED_PROVIDERS`
+
+    Returns the stored :class:`EndpointConfig`.  Re-registering the same
+    name overwrites the previous entry.
+    """
+    name = (name or "").strip()
+    provider = (provider or "openai").strip().lower()
+    model = (model or "").strip()
+    api_key = (api_key or "").strip()
+    base_url = (base_url or "").strip() or None
+
+    if not name:
+        raise ValueError("Endpoint name is required.")
+    if not model:
+        raise ValueError("Model name is required.")
+    if not api_key:
+        raise ValueError("API key is required (use 'dummy' for keyless local servers).")
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(
+            f"Unsupported type {provider!r} — use one of {SUPPORTED_PROVIDERS}."
+        )
+
+    cfg = EndpointConfig(
+        name=name,
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    with _session_lock:
+        if name in _scan_env_endpoints_by_name():
+            logger.warning(
+                "Session endpoint %r shadows an OCR_ENDPOINT_* env endpoint "
+                "with the same name for the rest of this process.",
+                name,
+            )
+        _session_endpoints[name] = cfg
+    logger.info("Registered session endpoint %r (%s / %s)", name, provider, model)
+    return cfg
+
+
+def clear_session_endpoints() -> None:
+    """Remove every endpoint that was added at runtime via the UI."""
+    with _session_lock:
+        _session_endpoints.clear()
+
+
+def session_endpoints() -> list[EndpointConfig]:
+    """Endpoints added at runtime via the UI (env-var ones excluded)."""
+    with _session_lock:
+        return list(_session_endpoints.values())
+
+
+def _scan_env_endpoints() -> list[EndpointConfig]:
     """Scan the environment for ``OCR_ENDPOINT_<n>_*`` configs.
 
     Each index is read independently.  An endpoint is registered only when
@@ -121,14 +200,33 @@ def discover_endpoints() -> list[EndpointConfig]:
     return endpoints
 
 
+def _scan_env_endpoints_by_name() -> dict[str, EndpointConfig]:
+    """Env endpoints keyed by name (helper for collision checks)."""
+    return {ep.name: ep for ep in _scan_env_endpoints()}
+
+
+def discover_endpoints() -> list[EndpointConfig]:
+    """All available endpoints: env-var configs plus UI-added ones.
+
+    Endpoints added at runtime via the UI take precedence over env-var
+    endpoints with the same name.  Entries are returned sorted by name.
+    """
+    merged: dict[str, EndpointConfig] = _scan_env_endpoints_by_name()
+    with _session_lock:
+        for ep in _session_endpoints.values():
+            merged[ep.name] = ep
+    return [merged[k] for k in sorted(merged)]
+
+
 def get_endpoint(name: str | None) -> Optional[EndpointConfig]:
-    """Return the first endpoint whose name matches, or ``None``."""
+    """Return the endpoint whose name matches, or ``None``."""
     if not name:
         return None
-    for ep in discover_endpoints():
-        if ep.name == name:
-            return ep
-    return None
+    with _session_lock:
+        session_ep = _session_endpoints.get(name)
+    if session_ep is not None:
+        return session_ep
+    return _scan_env_endpoints_by_name().get(name)
 
 
 def endpoint_choices() -> list[str]:

@@ -41,7 +41,13 @@ from observability import (
     check_groq_connectivity,
     check_langfuse_connectivity,
 )
-from endpoints import discover_endpoints
+from endpoints import (
+    clear_session_endpoints,
+    discover_endpoints,
+    endpoint_choices,
+    register_endpoint,
+    session_endpoints,
+)
 from state import Verdict
 
 import subprocess
@@ -441,6 +447,29 @@ def _format_run_summary(
         f'<span>{cost_summary}</span>'
         "</div>"
         "</div>"
+    )
+
+
+def _format_session_endpoints() -> str:
+    """Render cards for endpoints added at runtime via the UI form."""
+    eps = session_endpoints()
+    if not eps:
+        return (
+            '<p class="muted small">No endpoints added in this session yet — '
+            "fill the form above and click <b>Save & use endpoint</b>.</p>"
+        )
+    cards = "".join(
+        f'<div class="endpoint-card">'
+        f'<div class="endpoint-name">{html.escape(ep.name)}'
+        f'<span class="endpoint-badge">{ep.provider}</span></div>'
+        f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+        f' · {html.escape(ep.base_url or "default URL")} · key {ep.masked_key}</div>'
+        f'</div>'
+        for ep in eps
+    )
+    return (
+        f'<div class="card-title" style="margin:6px 0 6px">'
+        f'Added in this session ({len(eps)})</div><div>{cards}</div>'
     )
 
 
@@ -959,13 +988,50 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 value="",
                 label="LLM Endpoint",
                 info=(
-                    "Run the review on a custom model (OpenAI-compatible / "
-                    "Anthropic / Google). Empty = built-in default."
+                    "Pick a saved endpoint, or add your own below. "
+                    "Empty = built-in default."
                     if _endpoint_choices
-                    else "No custom endpoints configured — set OCR_ENDPOINT_* secrets to add one."
+                    else "No endpoints yet — add one below or set OCR_ENDPOINT_* secrets."
                 ),
                 scale=3,
             )
+
+        # ── Add your own endpoint (BYO key) ─────────────────────────
+        with gr.Accordion("➕ Add custom endpoint (BYO key)", open=False):
+            with gr.Row():
+                ep_name_input = gr.Textbox(
+                    label="Endpoint name",
+                    placeholder="e.g. My DeepSeek",
+                    scale=1,
+                )
+                ep_type_input = gr.Dropdown(
+                    choices=["openai", "anthropic", "google"],
+                    value="openai",
+                    label="Type",
+                    info="openai = any OpenAI-compatible API (DeepSeek, OpenRouter, Ollama…)",
+                    scale=1,
+                )
+            with gr.Row():
+                ep_base_url_input = gr.Textbox(
+                    label="API endpoint (base URL)",
+                    placeholder="https://api.deepseek.com/v1   (optional for google)",
+                    scale=2,
+                )
+                ep_model_input = gr.Textbox(
+                    label="Model",
+                    placeholder="deepseek-chat / claude-sonnet-4-20250514 / gemini-3.1-flash",
+                    scale=2,
+                )
+            ep_api_key_input = gr.Textbox(
+                label="API key",
+                type="password",
+                placeholder="sk-...  (stored in memory only, never written to disk)",
+            )
+            with gr.Row():
+                add_endpoint_btn = gr.Button("💾 Save & use endpoint", variant="primary", size="sm")
+                clear_endpoints_btn = gr.Button("🗑 Clear added endpoints", size="sm")
+            endpoint_save_msg = gr.Markdown()
+            session_endpoints_display = gr.HTML(value=_format_session_endpoints())
 
         with gr.Row():
             run_btn = gr.Button("▶ Run Review", variant="primary", size="lg", scale=2)
@@ -1070,6 +1136,67 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             fn=on_reject,
             inputs=[pr_state],
             outputs=[resume_msg],
+        )
+
+        # ── Add / clear custom endpoints ─────────────────────────────
+        def on_add_endpoint(name, ptype, base_url, api_key, model):
+            """Register the form values, refresh the dropdown, auto-select."""
+            try:
+                cfg = register_endpoint(name, ptype, api_key, base_url, model)
+                choices = [""] + endpoint_choices()
+                return (
+                    gr.update(choices=choices, value=cfg.name),
+                    f"✅ Saved **{cfg.name}** ({cfg.provider} / `{cfg.model}`) — "
+                    "it's selected above. Hit **▶ Run Review** to use it. "
+                    "Tip: use 🔌 Test endpoint connectivity (health tab) to check the key first.",
+                    _format_session_endpoints(),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                )
+            except ValueError as exc:
+                return (
+                    gr.update(),
+                    f"❌ {exc}",
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                )
+
+        def on_clear_endpoints():
+            """Remove all UI-added endpoints and reset the dropdown."""
+            clear_session_endpoints()
+            return (
+                gr.update(choices=[""] + endpoint_choices(), value=""),
+                "🗑 Cleared — dropdown reset to the built-in default.",
+                _format_session_endpoints(),
+            )
+
+        add_endpoint_btn.click(
+            fn=on_add_endpoint,
+            inputs=[
+                ep_name_input,
+                ep_type_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+            outputs=[
+                endpoint_input,
+                endpoint_save_msg,
+                session_endpoints_display,
+                ep_name_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+        )
+        clear_endpoints_btn.click(
+            fn=on_clear_endpoints,
+            outputs=[endpoint_input, endpoint_save_msg, session_endpoints_display],
         )
 
     # ── Tab: Smoke Test ──────────────────────────────────────────────────
