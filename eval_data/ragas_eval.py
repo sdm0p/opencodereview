@@ -61,17 +61,34 @@ def _check_ragas() -> bool:
 def _get_evaluator_llm():
     """Return a RAGAS-compatible LLM, reusing the project's LLM factory.
 
-    Follows the same priority as the main pipeline:
-    1. Google Gemini (``gemini-3.1-flash-lite``) via ``GEMINI_API_KEY``
-    2. Groq (``llama-3.3-70b-versatile``) via ``GROQ_API_KEY``
+    RAGAS scoring is routed to **Groq first** (falling back to Gemini)
+    because scoring fires many LLM calls per review, and the Gemini free
+    tier (15 req/min) is already shared with the main review pipeline —
+    using Groq's separate quota pool avoids the 429 rate-limit failures
+    that used to zero out the metrics.
+
+    Follows this priority:
+    1. Groq (``llama-3.3-70b-versatile``) via ``GROQ_API_KEY``
+    2. Google Gemini (``gemini-3.1-flash-lite``) via ``GEMINI_API_KEY``
 
     RAGAS v0.3+ uses ``LangchainLLMWrapper`` to wrap LangChain models.
     """
     from ragas.llms import LangchainLLMWrapper
 
     try:
-        from llm_factory import create_llm
-        llm = create_llm(temperature=0)
+        from llm_factory import _get_groq_chat, _get_gemini_chat
+
+        llm = _get_groq_chat(temperature=0)
+        if llm is None:
+            logger.info(
+                "RAGAS evaluator: GROQ_API_KEY not set — falling back to Gemini"
+            )
+            llm = _get_gemini_chat(temperature=0)
+        if llm is None:
+            raise ValueError(
+                "No LLM available for RAGAS scoring. "
+                "Set GROQ_API_KEY (preferred) or GEMINI_API_KEY."
+            )
         logger.info(
             "RAGAS evaluator: using %s",
             type(llm).__name__,
@@ -81,7 +98,7 @@ def _get_evaluator_llm():
         logger.warning("RAGAS evaluator: %s", exc)
         raise RuntimeError(
             "No LLM available for RAGAS scoring. "
-            "Set GEMINI_API_KEY or GROQ_API_KEY."
+            "Set GROQ_API_KEY (preferred) or GEMINI_API_KEY."
         ) from exc
 
 
@@ -93,7 +110,7 @@ def compute_ragas_retrieval_scores(
     retrieved_contexts: list[str],
     ground_truth: Optional[str] = None,
     answer: Optional[str] = None,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Compute RAGAS retrieval & generation quality metrics.
 
     Computes up to five metrics depending on available inputs:
@@ -125,9 +142,11 @@ def compute_ragas_retrieval_scores(
     Returns
     -------
     dict
-        Mapping of metric name → score (0–1 range, higher is better).
-        Possible keys: ``context_precision``, ``context_recall``,
-        ``faithfulness``, ``answer_relevancy``, ``mmr``.
+        Mapping of metric name → score (0–1 range, higher is better),
+        or ``None`` when that metric's computation failed (e.g. LLM
+        rate limit / error).  Possible keys: ``context_precision``,
+        ``context_recall``, ``faithfulness``, ``answer_relevancy``,
+        ``mmr``.
 
     Raises
     ------
@@ -152,7 +171,7 @@ def compute_ragas_retrieval_scores(
     from ragas.dataset_schema import SingleTurnSample
 
     llm = _get_evaluator_llm()
-    scores: dict[str, float] = {}
+    scores: dict[str, float | None] = {}
 
     # ── Context Precision (reference-free) ───────────────────────────
     # Uses LLMContextPrecisionWithoutReference which needs user_input +
@@ -172,7 +191,7 @@ def compute_ragas_retrieval_scores(
             logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
         except Exception as exc:
             logger.warning("RAGAS context_precision failed: %s", exc)
-            scores["context_precision"] = 0.0
+            scores["context_precision"] = None
 
     # ── Context Recall (requires ground_truth) ───────────────────────
     if ground_truth:
@@ -190,7 +209,7 @@ def compute_ragas_retrieval_scores(
             logger.info("RAGAS context_recall: %.4f", scores["context_recall"])
         except Exception as exc:
             logger.warning("RAGAS context_recall failed: %s", exc)
-            scores["context_recall"] = 0.0
+            scores["context_recall"] = None
 
     # ── Faithfulness ─────────────────────────────────────────────────
     if answer:
@@ -208,7 +227,7 @@ def compute_ragas_retrieval_scores(
             logger.info("RAGAS faithfulness: %.4f", scores["faithfulness"])
         except Exception as exc:
             logger.warning("RAGAS faithfulness failed: %s", exc)
-            scores["faithfulness"] = 0.0
+            scores["faithfulness"] = None
 
     # ── Answer Relevancy (ResponseRelevancy) ─────────────────────────
     if answer:
@@ -239,7 +258,7 @@ def compute_ragas_retrieval_scores(
             logger.info("RAGAS answer_relevancy: %.4f", scores["answer_relevancy"])
         except Exception as exc:
             logger.warning("RAGAS answer_relevancy failed: %s", exc)
-            scores["answer_relevancy"] = 0.0
+            scores["answer_relevancy"] = None
 
     # ── MMR (Mean Reciprocal Rank) — custom implementation ───────────
     try:
@@ -248,7 +267,7 @@ def compute_ragas_retrieval_scores(
         logger.info("RAGAS mmr: %.4f", scores["mmr"])
     except Exception as exc:
         logger.warning("RAGAS mmr failed: %s", exc)
-        scores["mmr"] = 0.0
+        scores["mmr"] = None
 
     # ── Context Precision (reference-based, fallback when no answer) ─
     if "context_precision" not in scores and ground_truth:
@@ -266,7 +285,7 @@ def compute_ragas_retrieval_scores(
             logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
         except Exception as exc:
             logger.warning("RAGAS context_precision failed: %s", exc)
-            scores["context_precision"] = 0.0
+            scores["context_precision"] = None
 
     return scores
 
@@ -329,7 +348,14 @@ def _compute_mmr(
     Returns
     -------
     float
-        MMR score in [0, 1].
+        MMR score in [0, 1]; 0.0 when chunks were judged but none were
+        relevant.
+
+    Raises
+    ------
+    RuntimeError
+        If every relevance judgment failed (e.g. LLM rate-limited) —
+        callers treat this as a failed metric rather than a fake 0.0.
     """
     if not retrieved_contexts:
         return 0.0
@@ -340,6 +366,7 @@ def _compute_mmr(
     MAX_MMR_RANK = 5
     top_chunks = retrieved_contexts[:MAX_MMR_RANK]
 
+    judged = 0
     for rank, chunk in enumerate(top_chunks, start=1):
         try:
             prompt = (
@@ -356,14 +383,20 @@ def _compute_mmr(
             response_text = raw.content.strip().upper() if hasattr(raw, "content") else str(raw).strip().upper()
             if response_text.startswith("Y"):
                 return 1.0 / rank
+            judged += 1  # judge responded — chunk deemed not relevant
         except Exception:
             continue
+
+    if judged == 0:
+        # Every relevance judgment failed (e.g. LLM rate-limited) — surface
+        # this as a failed metric instead of a misleading 0.0.
+        raise RuntimeError("all MMR relevance judgments failed")
 
     return 0.0
 
 
 def log_ragas_scores_to_langfuse(
-    scores: dict[str, float],
+    scores: dict[str, float | None],
     repo: str = "",
     pr_number: int = 0,
     handler: Any = None,
@@ -388,6 +421,8 @@ def log_ragas_scores_to_langfuse(
         return
 
     for metric_name, value in scores.items():
+        if value is None:
+            continue
         log_langfuse_score(
             name=f"ragas_{metric_name}",
             value=value,
@@ -507,7 +542,7 @@ def main() -> None:
             f"  {repo}#{pr}: "
             + " | ".join(
                 f"{k}={v:.3f}" for k, v in scores.items()
-                if k not in ("repo", "pr_number", "id")
+                if k not in ("repo", "pr_number", "id") and v is not None
             )
         )
 
@@ -522,7 +557,13 @@ def main() -> None:
             if k not in ("repo", "pr_number", "id")
         ]
         for metric in metrics:
-            values = [s.get(metric, 0.0) for s in all_scores]
+            values = [
+                s.get(metric) for s in all_scores
+                if s.get(metric) is not None
+            ]
+            if not values:
+                print(f"  {metric:30s}: n/a  (no successful scores)")
+                continue
             avg = sum(values) / len(values)
             print(f"  {metric:30s}: {avg:.4f}  (over {len(values)} PRs)")
         print()

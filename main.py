@@ -349,6 +349,8 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
                     # to avoid contextvar loss during the long computation.
                     # handler=handler is also passed as fallback resolution.
                     for metric_name, value in ragas_scores.items():
+                        if value is None:
+                            continue
                         log_langfuse_score(
                             name=f"ragas_{metric_name}",
                             value=value,
@@ -359,7 +361,10 @@ def _run_with_hitl(graph, repo: str, pr_number: int) -> None:
 
                     logger.info(
                         "  RAGAS scores logged to Langfuse: %s",
-                        " | ".join(f"{k}={v:.4f}" for k, v in ragas_scores.items()),
+                        " | ".join(
+                            f"{k}={v:.4f}" for k, v in ragas_scores.items()
+                            if v is not None
+                        ),
                     )
                 except ImportError:
                     logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")

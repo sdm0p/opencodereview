@@ -172,7 +172,7 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
             )
 
         # ── Compute and log RAGAS retrieval scores ─────────────────
-        ragas_scores: dict[str, float] = {}
+        ragas_scores: dict[str, float | None] = {}
         context_chunks = state.values.get("context_chunks", [])
         if context_chunks:
             try:
@@ -205,6 +205,8 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
                 # to avoid contextvar loss during the long computation.
                 # handler=handler is also passed as fallback resolution.
                 for metric_name, value in ragas_scores.items():
+                    if value is None:
+                        continue
                     log_langfuse_score(
                         name=f"ragas_{metric_name}",
                         value=value,
@@ -215,7 +217,10 @@ def _build_and_stream(repo: str, pr_number: int) -> tuple:
 
                 logger.info(
                     "RAGAS scores logged to Langfuse: %s",
-                    " | ".join(f"{k}={v:.4f}" for k, v in ragas_scores.items()),
+                    " | ".join(
+                        f"{k}={v:.4f}" for k, v in ragas_scores.items()
+                        if v is not None
+                    ),
                 )
             except ImportError:
                 logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
@@ -316,7 +321,7 @@ RAGAS_METRIC_TOOLTIPS = {
 }
 
 
-def _format_ragas_scores(scores: dict[str, float]) -> str:
+def _format_ragas_scores(scores: dict[str, float | None]) -> str:
     """Build an HTML card showing RAGAS retrieval quality metrics."""
     if not scores:
         return ""
@@ -331,6 +336,8 @@ def _format_ragas_scores(scores: dict[str, float]) -> str:
 
     bars: list[str] = []
     for key, value in scores.items():
+        if value is None:
+            continue
         label = RAGAS_METRIC_LABELS.get(key, key.replace("_", " ").title())
         tooltip = RAGAS_METRIC_TOOLTIPS.get(key, "")
         color = _score_color(value)

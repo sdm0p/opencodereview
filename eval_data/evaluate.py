@@ -511,6 +511,7 @@ def main() -> None:
                     + " | ".join(
                         f"{k}={v:.3f}"
                         for k, v in ragas_scores.items()
+                        if v is not None
                     )
                 )
             except Exception as exc:
@@ -605,16 +606,17 @@ def _log_to_observability(results: list[dict]) -> None:
 
     # Check which RAGAS scores were computed
     has_ragas = bool(results and any(k in results[0] for k in RAGAS_METRICS))
-    ragas_avgs: dict[str, float] = {}
+    ragas_avgs: dict[str, float | None] = {}
     if has_ragas:
         for metric in RAGAS_METRICS:
-            values = [r.get(metric, 0.0) for r in results if metric in r]
-            ragas_avgs[metric] = sum(values) / len(values) if values else 0.0
+            values = [r[metric] for r in results if r.get(metric) is not None]
+            ragas_avgs[metric] = sum(values) / len(values) if values else None
 
     log_parts = [f"micro F1={micro_f:.3f}"]
     if has_ragas:
         for metric, avg in ragas_avgs.items():
-            log_parts.append(f"RAGAS_{metric}={avg:.3f}")
+            if avg is not None:
+                log_parts.append(f"RAGAS_{metric}={avg:.3f}")
     log_parts.append(f"PRs={len(results)}")
     log_parts.append(f"LangSmith={is_langsmith_enabled()}")
     log_parts.append(f"Langfuse={is_langfuse_enabled()}")
@@ -658,7 +660,7 @@ def _log_to_observability(results: list[dict]) -> None:
                 # visibility apply uniformly (same as app.py/main.py).
                 for ragas_key in ("context_precision", "context_recall",
                                   "faithfulness", "answer_relevancy", "mmr"):
-                    if ragas_key in r:
+                    if ragas_key in r and r[ragas_key] is not None:
                         log_langfuse_score(
                             name=f"ragas_{ragas_key}",
                             value=r[ragas_key],
@@ -675,7 +677,8 @@ def _log_to_observability(results: list[dict]) -> None:
             # Log aggregate RAGAS scores
             if has_ragas:
                 for metric, avg in ragas_avgs.items():
-                    lf.create_score(name=metric, value=avg)
+                    if avg is not None:
+                        lf.create_score(name=metric, value=avg)
 
             # Flush and shutdown to ensure scores are sent before process exits
             lf.flush()
