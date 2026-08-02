@@ -195,6 +195,31 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
 
         ep = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
         if ep is not None:
+            if getattr(ep, "builtin", False):
+                # Built-in providers use their native constructors so the
+                # behaviour is identical to the default (no-endpoint) path.
+                if ep.name == "Gemini":
+                    llm = _get_gemini_chat(**kwargs)
+                    if llm is not None:
+                        logger.info(
+                            "Using built-in Gemini endpoint (model=%s)",
+                            kwargs.get("model", GEMINI_MODEL),
+                        )
+                        return llm
+                    raise ValueError(
+                        "Gemini selected but GEMINI_API_KEY is not set."
+                    )
+                if ep.name == "Grok":
+                    llm = _get_groq_chat(**kwargs)
+                    if llm is not None:
+                        logger.info(
+                            "Using built-in Grok endpoint (model=%s)",
+                            kwargs.get("model", GROQ_MODEL),
+                        )
+                        return llm
+                    raise ValueError(
+                        "Grok selected but GROQ_API_KEY is not set."
+                    )
             try:
                 llm = create_endpoint_llm(ep, **kwargs)
                 logger.info("Using custom endpoint %s (%s/%s)", ep.name, ep.provider, ep.model)
@@ -204,7 +229,8 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
         else:
             raise ValueError(
                 f"Custom endpoint '{endpoint}' not found. "
-                "Configure it via OCR_ENDPOINT_* environment variables."
+                "Configure it via OCR_ENDPOINT_* environment variables "
+                "or add it in the UI."
             )
 
     llm = _get_gemini_chat(**kwargs)

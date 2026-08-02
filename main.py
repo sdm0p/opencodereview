@@ -180,7 +180,7 @@ SYNTHETIC_STATE = {
     "--endpoint", "endpoint_name",
     default="",
     show_default=True,
-    help="Name of a configured custom LLM endpoint (see OCR_ENDPOINT_* env vars).",
+    help="LLM endpoint: Gemini/Grok (built-ins) or a custom name (see OCR_ENDPOINT_* env vars).",
 )
 def review(repo: str, pr_number: int, smoke: bool, endpoint_name: str) -> None:
     """Run a PR review with human-in-the-loop approval.
@@ -540,8 +540,8 @@ def doctor() -> None:
         click.echo(f"  {comp}: {status}")
     click.echo()
 
-    # ── Custom endpoints ────────────────────────────────────────────────
-    click.echo("🔌 Custom Endpoints")
+    # ── LLM endpoints (built-ins + custom) ───────────────────────────────
+    click.echo("🔌 LLM Endpoints")
     from endpoints import discover_endpoints
 
     eps = discover_endpoints()

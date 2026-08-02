@@ -44,7 +44,7 @@ from observability import (
 from endpoints import (
     clear_session_endpoints,
     discover_endpoints,
-    endpoint_choices,
+    dropdown_choices,
     register_endpoint,
     session_endpoints,
 )
@@ -521,16 +521,28 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
 
 
 def test_endpoints() -> str:
-    """Probe every configured endpoint and render status cards."""
+    """Probe every configured endpoint and render status cards.
+
+    Built-in providers (Gemini/Grok) whose key is not set are skipped with
+    a ``⏭️ key not set`` note instead of being probed (a probe would just
+    fail with 401 / an auth error).
+    """
     eps = discover_endpoints()
-    if not eps:
-        return (
-            '<p class="muted">No custom endpoints configured — add '
-            'OCR_ENDPOINT_* secrets first.</p>'
-        )
 
     cards = []
     for ep in eps:
+        if ep.builtin and not ep.api_key:
+            cards.append(
+                f'<div class="endpoint-card">'
+                f'<div class="endpoint-name">{ep.name}'
+                f'<span class="endpoint-badge">{ep.provider}</span></div>'
+                f'<div class="endpoint-meta"><code>{ep.model}</code>'
+                f' · {ep.base_url or "default URL"} · key {ep.masked_key}</div>'
+                f'<div class="endpoint-meta" style="color:var(--text-muted);font-weight:700">'
+                f'⏭️ key not set (add GEMINI_API_KEY / GROQ_API_KEY)</div>'
+                f'</div>'
+            )
+            continue
         ok, detail = _probe_endpoint(ep)
         status_color = "#16a34a" if ok else "#dc2626"
         cards.append(
@@ -937,10 +949,10 @@ except Exception as exc:
 with gr.Blocks(title="OpenCodeReview") as demo:
     demo.load(js=JS_RESTORE_THEME)
 
-    # Discover configured endpoints once — reused by the hero chip, the
-    # dropdown, and the health accordion.
+    # Discover configured endpoints once — reused by the hero chip and the
+    # health accordion.  (The dropdown builds its grouped choices live via
+    # endpoints.dropdown_choices() so built-ins + added endpoints stay in sync.)
     _configured_endpoints = discover_endpoints()
-    _endpoint_choices = [ep.name for ep in _configured_endpoints]
 
     with gr.Row():
         with gr.Column(scale=4):
@@ -951,8 +963,9 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 '<h1 class="hero-title">OpenCodeReview</h1>'
                 '<p class="hero-sub">AI-powered PR review with human-in-the-loop approval</p>'
                 f'<div class="chips-row" style="margin-top:8px">'
-                f'<span class="key-chip ok">⚡ {len(_configured_endpoints)} custom endpoint'
+                f'<span class="key-chip ok">⚡ {len(_configured_endpoints)} endpoint'
                 f'{"s" if len(_configured_endpoints) != 1 else ""}</span>'
+                '<span class="key-chip" style="color:var(--accent);background:var(--accent-soft);border-color:#6366f144">✨ Gemini · Grok built-ins</span>'
                 '<span class="key-chip" style="color:var(--text-muted);background:var(--bg-card-alt);border-color:var(--border-color)">🔐 BYO keys</span>'
                 '</div>'
                 '</div>'
@@ -984,14 +997,12 @@ with gr.Blocks(title="OpenCodeReview") as demo:
 
         with gr.Row():
             endpoint_input = gr.Dropdown(
-                choices=[""] + _endpoint_choices,
+                choices=dropdown_choices(),
                 value="",
                 label="LLM Endpoint",
                 info=(
-                    "Pick a saved endpoint, or add your own below. "
-                    "Empty = built-in default."
-                    if _endpoint_choices
-                    else "No endpoints yet — add one below or set OCR_ENDPOINT_* secrets."
+                    "Built-in: Gemini & Grok. Pick one, or add your own below. "
+                    "Empty = auto (Gemini → Grok fallback)."
                 ),
                 scale=3,
             )
@@ -1143,7 +1154,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             """Register the form values, refresh the dropdown, auto-select."""
             try:
                 cfg = register_endpoint(name, ptype, api_key, base_url, model)
-                choices = [""] + endpoint_choices()
+                choices = dropdown_choices()
                 return (
                     gr.update(choices=choices, value=cfg.name),
                     f"✅ Saved **{cfg.name}** ({cfg.provider} / `{cfg.model}`) — "
@@ -1170,7 +1181,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             """Remove all UI-added endpoints and reset the dropdown."""
             clear_session_endpoints()
             return (
-                gr.update(choices=[""] + endpoint_choices(), value=""),
+                gr.update(choices=dropdown_choices(), value=""),
                 "🗑 Cleared — dropdown reset to the built-in default.",
                 _format_session_endpoints(),
             )
@@ -1297,7 +1308,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         gr.HTML("<ul>" + "".join(lines) + "</ul>")
 
         gr.HTML(
-            '<div class="card-title" style="margin:14px 0 8px">⚡ Custom LLM Endpoints</div>'
+            '<div class="card-title" style="margin:14px 0 8px">⚡ LLM Endpoints</div>'
         )
         if _configured_endpoints:
             endpoint_cards = "".join(

@@ -52,6 +52,7 @@ class EndpointConfig:
     base_url: Optional[str] = None
     model: str = ""
     index: int = 0  # the env-var index the endpoint came from
+    builtin: bool = False  # True for the always-available Gemini/Grok providers
 
     def __post_init__(self) -> None:
         self.provider = (self.provider or "openai").strip().lower()
@@ -137,10 +138,13 @@ def register_endpoint(
         model=model,
     )
     with _session_lock:
-        if name in _scan_env_endpoints_by_name():
+        if name in _scan_env_endpoints_by_name() or any(
+            ep.name == name for ep in builtin_endpoints()
+        ):
             logger.warning(
-                "Session endpoint %r shadows an OCR_ENDPOINT_* env endpoint "
-                "with the same name for the rest of this process.",
+                "Session endpoint %r shadows an existing endpoint "
+                "(OCR_ENDPOINT_* env or built-in) with the same name for "
+                "the rest of this process.",
                 name,
             )
         _session_endpoints[name] = cfg
@@ -205,13 +209,45 @@ def _scan_env_endpoints_by_name() -> dict[str, EndpointConfig]:
     return {ep.name: ep for ep in _scan_env_endpoints()}
 
 
-def discover_endpoints() -> list[EndpointConfig]:
-    """All available endpoints: env-var configs plus UI-added ones.
+def builtin_endpoints() -> list[EndpointConfig]:
+    """The always-available built-in providers (Gemini, Grok).
 
-    Endpoints added at runtime via the UI take precedence over env-var
-    endpoints with the same name.  Entries are returned sorted by name.
+    These are surfaced as selectable endpoints so the UI/CLI can choose
+    explicitly between them.  They read their keys from the standard
+    ``GEMINI_API_KEY`` / ``GROQ_API_KEY`` env vars and run on the same
+    models as the default (no-endpoint) path.
     """
-    merged: dict[str, EndpointConfig] = _scan_env_endpoints_by_name()
+    from llm_factory import GEMINI_MODEL, GROQ_MODEL
+
+    return [
+        EndpointConfig(
+            name="Gemini",
+            provider="google",
+            api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
+            model=GEMINI_MODEL,
+            builtin=True,
+        ),
+        EndpointConfig(
+            name="Grok",
+            provider="openai",
+            api_key=os.environ.get("GROQ_API_KEY", "").strip(),
+            base_url="https://api.groq.com/openai/v1",
+            model=GROQ_MODEL,
+            builtin=True,
+        ),
+    ]
+
+
+def discover_endpoints() -> list[EndpointConfig]:
+    """All available endpoints: built-ins + env-var configs + UI-added ones.
+
+    Precedence on name collision: UI-added (session) > env-var > built-in.
+    Entries are returned sorted by name.
+    """
+    merged: dict[str, EndpointConfig] = {
+        ep.name: ep for ep in builtin_endpoints()
+    }
+    merged.update(_scan_env_endpoints_by_name())
     with _session_lock:
         for ep in _session_endpoints.values():
             merged[ep.name] = ep
@@ -219,16 +255,45 @@ def discover_endpoints() -> list[EndpointConfig]:
 
 
 def get_endpoint(name: str | None) -> Optional[EndpointConfig]:
-    """Return the endpoint whose name matches, or ``None``."""
+    """Return the endpoint whose name matches, or ``None``.
+
+    Resolution order: UI-added (session) → env-var → built-in.
+    """
     if not name:
         return None
     with _session_lock:
         session_ep = _session_endpoints.get(name)
     if session_ep is not None:
         return session_ep
-    return _scan_env_endpoints_by_name().get(name)
+    env_ep = _scan_env_endpoints_by_name().get(name)
+    if env_ep is not None:
+        return env_ep
+    return next((b for b in builtin_endpoints() if b.name == name), None)
 
 
-def endpoint_choices() -> list[str]:
-    """Names of all configured endpoints, for the UI dropdown."""
-    return [ep.name for ep in discover_endpoints()]
+def dropdown_choices() -> list[str | tuple[str, list[str]]]:
+    """Grouped choices for the UI dropdown.
+
+    Returns a Gradio-compatible choice list with two optgroups:
+    ``("Built-in", ["Gemini", "Grok"])`` and ``("Custom", [...])`` —
+    so the user can pick a *section* for the built-in providers vs the
+    custom endpoints they configured.  An empty string entry keeps the
+    "auto" (no-endpoint) option first.
+
+    A built-in is omitted from its group when a custom endpoint shadows it
+    by name (session > env > built-in precedence), so each name appears
+    exactly once.
+    """
+    custom_names = [
+        ep.name for ep in discover_endpoints() if not ep.builtin
+    ]
+    builtin_names = [
+        ep.name for ep in builtin_endpoints()
+        if ep.name not in custom_names
+    ]
+    choices: list = [""]
+    if builtin_names:
+        choices.append(("Built-in", builtin_names))
+    if custom_names:
+        choices.append(("Custom", custom_names))
+    return choices
