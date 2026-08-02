@@ -15,6 +15,7 @@ import html
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -42,6 +43,7 @@ from observability import (
     check_langfuse_connectivity,
 )
 from endpoints import (
+    EndpointConfig,
     clear_session_endpoints,
     discover_endpoints,
     dropdown_choices,
@@ -99,7 +101,12 @@ def _init_observability_ui() -> None:
         logger.info("Observability: Langfuse enabled for Gradio UI")
 
 
-def _build_and_stream(repo: str, pr_number: int, endpoint_name: str = "") -> tuple:
+def _build_and_stream(
+    repo: str,
+    pr_number: int,
+    endpoint_name: str = "",
+    ragas_background: bool = False,
+) -> tuple:
     """Build the graph, stream up to the interrupt, and return state + config.
 
     Parameters
@@ -107,6 +114,10 @@ def _build_and_stream(repo: str, pr_number: int, endpoint_name: str = "") -> tup
     endpoint_name : str
         Optional name of a configured custom LLM endpoint
         (``OCR_ENDPOINT_*``).  Empty string uses the built-in provider.
+    ragas_background : bool
+        When True, RAGAS scoring runs on a background daemon thread and the
+        fourth return element is a task id (str) to poll instead of the
+        scores dict — so the UI can show results immediately.
     """
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
@@ -189,61 +200,22 @@ def _build_and_stream(repo: str, pr_number: int, endpoint_name: str = "") -> tup
             )
 
         # ── Compute and log RAGAS retrieval scores ─────────────────
-        ragas_scores: dict[str, float | None] = {}
-        context_chunks = state.values.get("context_chunks", [])
-        if context_chunks:
-            try:
-                from eval_data.ragas_eval import compute_ragas_retrieval_scores
-
-                query = state.values.get("diff", "") or ""
-                contexts = [c.content for c in context_chunks if c.content]
-
-                # Build answer text from findings + verdict for
-                # faithfulness & answer_relevancy metrics
-                answer_lines = []
-                for f in findings:
-                    answer_lines.append(
-                        f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
-                    )
-                if state.values.get("verdict"):
-                    v = state.values["verdict"]
-                    answer_lines.append(
-                        f"Verdict: {v.recommendation} (score={v.overall_score}/10) — {v.summary}"
-                    )
-                answer_text = "\n".join(answer_lines) if answer_lines else None
-
-                ragas_scores = compute_ragas_retrieval_scores(
-                    query=query,
-                    retrieved_contexts=contexts,
-                    answer=answer_text,
-                    endpoint=endpoint_name or None,
+        # Background mode spawns a thread and returns a task id so the UI
+        # can render results immediately; sync mode (CLI/health) waits.
+        ragas_out: dict[str, float | None] | str = {}
+        ragas_inputs = _ragas_inputs_from_state(state, endpoint_name)
+        if ragas_inputs:
+            if ragas_background:
+                # handler is not shared across threads (langfuse contextvars
+                # are lost in the worker); the captured trace_id is passed
+                # explicitly instead.
+                ragas_out = _spawn_ragas_background(
+                    ragas_inputs, repo, pr_number, run_trace_id, None,
                 )
-
-                # Log RAGAS scores with the explicitly captured trace_id
-                # to avoid contextvar loss during the long computation.
-                # handler=handler is also passed as fallback resolution.
-                for metric_name, value in ragas_scores.items():
-                    if value is None:
-                        continue
-                    log_langfuse_score(
-                        name=f"ragas_{metric_name}",
-                        value=value,
-                        comment=f"{repo}#{pr_number} — {metric_name}",
-                        trace_id=run_trace_id,
-                        handler=handler,
-                    )
-
-                logger.info(
-                    "RAGAS scores logged to Langfuse: %s",
-                    " | ".join(
-                        f"{k}={v:.4f}" for k, v in ragas_scores.items()
-                        if v is not None
-                    ),
+            else:
+                ragas_out = _compute_and_log_ragas(
+                    ragas_inputs, repo, pr_number, run_trace_id, handler,
                 )
-            except ImportError:
-                logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
-            except Exception as exc:
-                logger.warning("RAGAS scoring failed: %s", exc)
 
     # Close the checkpointer connection (checkpoints persist to disk so the
     # resume path opens a fresh one) and ship any queued Langfuse scores.
@@ -252,7 +224,7 @@ def _build_and_stream(repo: str, pr_number: int, endpoint_name: str = "") -> tup
         conn.close()
     flush_langfuse()
 
-    return state, config, cost_tracker.summary(), ragas_scores
+    return state, config, cost_tracker.summary(), ragas_out
 
 
 def _format_findings_table(findings: list) -> str:
@@ -410,6 +382,151 @@ def _format_ragas_scores(scores: dict[str, float | None]) -> str:
         + note
         + "</div>"
     )
+
+
+RAGAS_PENDING_HTML = (
+    '<div class="ocr-card">'
+    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+    '<div class="loading-spinner" style="justify-content:flex-start;padding:10px 0">'
+    '<div class="spinner"></div>'
+    '<span class="label">Computing RAGAS scores in the background…</span>'
+    "</div>"
+    "</div>"
+)
+
+RAGAS_FAILED_HTML = (
+    '<div class="ocr-card">'
+    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+    '<p class="muted small">N/A — RAGAS scoring failed '
+    "(likely LLM rate-limited or timed out). Check the logs for details.</p>"
+    "</div>"
+)
+
+# After this long a background RAGAS task is considered stalled and the
+# placeholder is replaced with the failure card instead of spinning forever.
+RAGAS_TIMEOUT_SECONDS = 600
+
+# Background RAGAS task registry: the UI spawns scoring on a daemon thread
+# and a gr.Timer polls this dict, so review results render immediately
+# instead of waiting minutes for the RAGAS LLM calls.
+_ragas_tasks: dict[str, dict] = {}
+_ragas_lock = threading.Lock()
+
+
+def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
+    """Extract the inputs RAGAS needs from the finished graph state."""
+    context_chunks = state.values.get("context_chunks", [])
+    if not context_chunks:
+        return None
+    query = state.values.get("diff", "") or ""
+    contexts = [c.content for c in context_chunks if c.content]
+
+    # Build answer text from findings + verdict for
+    # faithfulness & answer_relevancy metrics
+    answer_lines = []
+    for f in state.values.get("final_findings", []):
+        answer_lines.append(
+            f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
+        )
+    if state.values.get("verdict"):
+        v = state.values["verdict"]
+        answer_lines.append(
+            f"Verdict: {v.recommendation} (score={v.overall_score}/10) — {v.summary}"
+        )
+    answer_text = "\n".join(answer_lines) if answer_lines else None
+    return {
+        "query": query,
+        "contexts": contexts,
+        "answer": answer_text,
+        "endpoint": endpoint_name or None,
+    }
+
+
+def _compute_and_log_ragas(
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+) -> dict[str, float | None]:
+    """Compute RAGAS scores and log them to Langfuse. Never raises."""
+    scores: dict[str, float | None] = {}
+    try:
+        from eval_data.ragas_eval import compute_ragas_retrieval_scores
+
+        scores = compute_ragas_retrieval_scores(
+            query=inputs["query"],
+            retrieved_contexts=inputs["contexts"],
+            answer=inputs["answer"],
+            endpoint=inputs["endpoint"],
+        )
+        for metric_name, value in scores.items():
+            if value is None:
+                continue
+            log_langfuse_score(
+                name=f"ragas_{metric_name}",
+                value=value,
+                comment=f"{repo}#{pr_number} — {metric_name}",
+                trace_id=run_trace_id,
+                handler=handler,
+            )
+        logger.info(
+            "RAGAS scores logged to Langfuse: %s",
+            " | ".join(
+                f"{k}={v:.4f}" for k, v in scores.items() if v is not None
+            ),
+        )
+    except ImportError:
+        logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
+    except Exception as exc:
+        logger.warning("RAGAS scoring failed: %s", exc)
+    return scores
+
+
+def _ragas_worker(
+    task_id: str,
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+) -> None:
+    """Daemon thread body: compute scores, stash them for the Timer poll."""
+    scores = _compute_and_log_ragas(inputs, repo, pr_number, run_trace_id, handler)
+    with _ragas_lock:
+        entry = _ragas_tasks.get(task_id)
+        if entry is not None:
+            entry["scores"] = scores
+            entry["done"] = True
+    # Ship the Langfuse scores logged from this thread.
+    flush_langfuse()
+
+
+def _spawn_ragas_background(
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+) -> str:
+    """Start RAGAS scoring on a daemon thread; return a task id to poll."""
+    task_id = f"ragas-{uuid.uuid4().hex[:12]}"
+    with _ragas_lock:
+        _ragas_tasks[task_id] = {"done": False, "scores": None, "started": time.time()}
+        if len(_ragas_tasks) > 64:
+            # Drop oldest finished entries to bound memory.
+            for old_id in list(_ragas_tasks):
+                if _ragas_tasks[old_id].get("done"):
+                    del _ragas_tasks[old_id]
+                if len(_ragas_tasks) <= 64:
+                    break
+    threading.Thread(
+        target=_ragas_worker,
+        args=(task_id, inputs, repo, pr_number, run_trace_id, handler),
+        name=f"ragas-{task_id}",
+        daemon=True,
+    ).start()
+    return task_id
 
 
 def _format_findings_count(findings: list) -> str:
@@ -595,10 +712,19 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     if endpoint_name:
         from endpoints import get_endpoint
 
-        if get_endpoint(endpoint_name) is None:
+        ep = get_endpoint(endpoint_name)
+        if ep is None:
             yield [None, None, None, None, None, None], (
                 f"❌ Endpoint '{endpoint_name}' not found — pick one from "
                 "the list or add it in the form above."
+            )
+            return
+        if ep.builtin and not ep.api_key:
+            key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
+            yield [None, None, None, None, None, None], (
+                f"❌ Endpoint '{ep.name}' is selected but its key is not set — "
+                f"add `{key_var}` as a Space secret, or add a custom endpoint "
+                "in the form above."
             )
             return
 
@@ -608,8 +734,8 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
 
     t0 = time.time()
     try:
-        state, config, cost_summary, ragas_scores = _build_and_stream(
-            repo.strip(), pr_number, endpoint_name,
+        state, config, cost_summary, ragas_out = _build_and_stream(
+            repo.strip(), pr_number, endpoint_name, ragas_background=True,
         )
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
@@ -631,7 +757,12 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     progress(0.8, desc="Formatting results…")
 
     verdict_html = _format_verdict(verdict)
-    ragas_html = _format_ragas_scores(ragas_scores)
+    if isinstance(ragas_out, str):
+        ragas_task_id = ragas_out
+        ragas_html = RAGAS_PENDING_HTML
+    else:
+        ragas_task_id = ""
+        ragas_html = _format_ragas_scores(ragas_out)
     findings_html = _format_findings_table(findings)
     count_html = _format_findings_count(findings)
     # Strip non-serializable callbacks before saving config to state
@@ -644,7 +775,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     )
 
     yield (
-        [run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json],
+        [run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id],
         None,
     )
 
@@ -991,6 +1122,9 @@ with gr.Blocks(title="OpenCodeReview") as demo:
     # ── State ────────────────────────────────────────────────────────────
     pr_state = gr.State()
     smoke_state = gr.State()
+    # Id of this session's background RAGAS task — the gr.Timer below polls
+    # it so review results render immediately instead of waiting on RAGAS.
+    ragas_task_state = gr.State(value="")
 
     # ── Tab: Review a PR ─────────────────────────────────────────────────
     with gr.Tab("Review a PR"):
@@ -1025,6 +1159,36 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 allow_custom_value=True,
                 scale=3,
             )
+            test_selected_btn = gr.Button("🔌 Test selected", size="sm", scale=1)
+        endpoint_test_msg = gr.Markdown()
+
+        def on_test_selected(endpoint_name):
+            """Probe the currently selected endpoint (built-in or custom)."""
+            if not endpoint_name:
+                return (
+                    "ℹ️ Leave the endpoint empty for auto (Gemini → Grok fallback), "
+                    "or pick one and test it here."
+                )
+            from endpoints import get_endpoint
+
+            ep = get_endpoint(endpoint_name)
+            if ep is None:
+                return f"❌ Endpoint '{endpoint_name}' not found — add it in the form below first."
+            if ep.builtin and not ep.api_key:
+                key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
+                return (
+                    f"⏭️ **{ep.name}** key is not set — add `{key_var}` "
+                    "as a Space secret to test it."
+                )
+            ok, detail = _probe_endpoint(ep)
+            icon = "✅" if ok else "❌"
+            return f"{icon} **{ep.name}** (`{ep.model}`): {detail}"
+
+        test_selected_btn.click(
+            fn=on_test_selected,
+            inputs=[endpoint_input],
+            outputs=[endpoint_test_msg],
+        )
 
         # ── Add your own endpoint (BYO key) ─────────────────────────
         with gr.Accordion("➕ Add custom endpoint (BYO key)", open=False):
@@ -1058,6 +1222,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 placeholder="sk-...  (stored in memory only, never written to disk)",
             )
             with gr.Row():
+                test_form_btn = gr.Button("🔌 Test this endpoint", size="sm")
                 add_endpoint_btn = gr.Button("💾 Save & use endpoint", variant="primary", size="sm")
                 clear_endpoints_btn = gr.Button("🗑 Clear added endpoints", size="sm")
             endpoint_save_msg = gr.Markdown()
@@ -1100,6 +1265,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 *[None, None, None, None],
                 None,
                 gr.update(visible=False),
+                gr.update(value=""),
             ]
 
             for result, err in run_review(*args):
@@ -1113,9 +1279,10 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                         *[None, None, None, None],
                         None,
                         gr.update(visible=False),
+                        gr.update(value=""),
                     ]
                 else:
-                    run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json = result
+                    run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id = result
                     yield [
                         gr.update(visible=False),
                         gr.update(visible=False),
@@ -1128,6 +1295,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                         gr.update(value=ragas_html),
                         config_json,
                         gr.update(visible=True),
+                        gr.update(value=ragas_task_id),
                     ]
 
         run_event = run_btn.click(
@@ -1145,6 +1313,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 ragas_display,
                 pr_state,
                 results_panel,
+                ragas_task_state,
             ],
         )
         cancel_btn.click(fn=None, cancels=[run_event])
@@ -1166,6 +1335,44 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             fn=on_reject,
             inputs=[pr_state],
             outputs=[resume_msg],
+        )
+
+        # ── Background RAGAS polling ────────────────────────────────────
+        # RAGAS scoring runs on a background thread so the review results
+        # render immediately; this Timer polls for the finished scores and
+        # swaps the "computing…" placeholder for the metric card.
+        ragas_timer = gr.Timer(5, active=True)
+
+        def on_ragas_tick(task_id):
+            """Render background RAGAS scores when the task finishes."""
+            if not task_id:
+                return gr.update(), gr.update()
+            with _ragas_lock:
+                entry = _ragas_tasks.get(task_id)
+            if entry is None:
+                return gr.update(), gr.update()
+            if not entry.get("done"):
+                # Stalled guard: give up after the timeout instead of
+                # leaving the "computing…" placeholder forever.
+                started = entry.get("started") or 0
+                if time.time() - started > RAGAS_TIMEOUT_SECONDS:
+                    with _ragas_lock:
+                        _ragas_tasks.pop(task_id, None)
+                    return gr.update(value=RAGAS_FAILED_HTML), gr.update(value="")
+                return gr.update(), gr.update()
+            scores = entry.get("scores") or {}
+            with _ragas_lock:
+                _ragas_tasks.pop(task_id, None)
+            if scores:
+                html_out = _format_ragas_scores(scores)
+            else:
+                html_out = RAGAS_FAILED_HTML
+            return gr.update(value=html_out), gr.update(value="")
+
+        ragas_timer.tick(
+            fn=on_ragas_tick,
+            inputs=[ragas_task_state],
+            outputs=[ragas_display, ragas_task_state],
         )
 
         # ── Add / clear custom endpoints ─────────────────────────────
@@ -1227,6 +1434,46 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         clear_endpoints_btn.click(
             fn=on_clear_endpoints,
             outputs=[endpoint_input, endpoint_save_msg, session_endpoints_display],
+        )
+
+        def on_test_form(name, ptype, base_url, api_key, model):
+            """Probe the form values WITHOUT saving them to the registry."""
+            name = (name or "").strip()
+            model = (model or "").strip()
+            api_key = (api_key or "").strip()
+            base_url = (base_url or "").strip() or None
+            if not (name and model and api_key):
+                return (
+                    "❌ Fill in **name**, **model** and **API key** first "
+                    "(use `dummy` for keyless local servers)."
+                )
+            from endpoints import SUPPORTED_PROVIDERS
+
+            if (ptype or "openai").strip().lower() not in SUPPORTED_PROVIDERS:
+                return f"❌ Unsupported type — use one of {SUPPORTED_PROVIDERS}."
+            cfg = EndpointConfig(
+                name=name,
+                provider=ptype,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+            )
+            ok, detail = _probe_endpoint(cfg)
+            icon = "✅" if ok else "❌"
+            if ok:
+                return f"{icon} **{name}** (`{model}`) reachable — {detail}"
+            return f"{icon} **{name}** unreachable — {detail}"
+
+        test_form_btn.click(
+            fn=on_test_form,
+            inputs=[
+                ep_name_input,
+                ep_type_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+            outputs=[endpoint_save_msg],
         )
 
     # ── Tab: Smoke Test ──────────────────────────────────────────────────

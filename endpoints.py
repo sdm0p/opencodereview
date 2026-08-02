@@ -272,12 +272,13 @@ def get_endpoint(name: str | None) -> Optional[EndpointConfig]:
 
 
 def dropdown_choices() -> list[str | tuple[str, list[str]]]:
-    """Grouped choices for the UI dropdown.
+    """Choices for the UI dropdown.
 
-    Returns a Gradio-compatible choice list with two optgroups:
-    ``("Built-in", ["Gemini", "Grok"])`` and ``("Custom", [...])`` —
-    so the user can pick a *section* for the built-in providers vs the
-    custom endpoints they configured.  An empty string entry keeps the
+    Built-in providers (Gemini, Grok) appear under a ``"Built-in"``
+    optgroup so the user can pick a *section* for them.  Custom endpoints
+    are listed as flat entries under their own specified name — NOT grouped
+    under a "Custom" header — so an added endpoint is immediately
+    identifiable by name in the list.  An empty string entry keeps the
     "auto" (no-endpoint) option first.
 
     A built-in is omitted from its group when a custom endpoint shadows it
@@ -294,6 +295,7 @@ def dropdown_choices() -> list[str | tuple[str, list[str]]]:
     choices: list = [""]
     if builtin_names:
         choices.append(("Built-in", builtin_names))
-    if custom_names:
-        choices.append(("Custom", custom_names))
+    # Custom endpoints appear as their own named entries (flat), so the
+    # user sees e.g. "DeepSeek V4" instead of a generic "Custom" group.
+    choices.extend(custom_names)
     return choices
