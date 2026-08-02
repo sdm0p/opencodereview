@@ -589,6 +589,19 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
         yield [None, None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
         return
 
+    # Fail fast on an unknown endpoint name (allow_custom_value lets any
+    # string through the dropdown; the reviewer nodes would otherwise
+    # swallow the ValueError and report a confusing empty review).
+    if endpoint_name:
+        from endpoints import get_endpoint
+
+        if get_endpoint(endpoint_name) is None:
+            yield [None, None, None, None, None, None], (
+                f"❌ Endpoint '{endpoint_name}' not found — pick one from "
+                "the list or add it in the form above."
+            )
+            return
+
     _cleanup_db()
 
     progress(0.1, desc="Building graph…")
@@ -1004,6 +1017,12 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                     "Built-in: Gemini & Grok. Pick one, or add your own below. "
                     "Empty = auto (Gemini → Grok fallback)."
                 ),
+                # Grouped optgroup choices make Gradio's strict membership
+                # check reject values that sit inside a group (e.g. a custom
+                # endpoint registered moments ago).  allow_custom_value lets
+                # any registered endpoint name pass through; unknown names
+                # still fail with a clear error at review time.
+                allow_custom_value=True,
                 scale=3,
             )
 
