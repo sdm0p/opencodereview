@@ -551,17 +551,18 @@ def _format_findings_count(findings: list) -> str:
 
 
 def _format_run_summary(
-    repo: str, pr_number: int, endpoint_name: str, duration: float, cost_summary: str
+    repo: str, pr_number: int, endpoint_name: str, duration: float, cost_summary: str | dict
 ) -> str:
     """Build a compact run-summary card shown above the results."""
     endpoint_display = html.escape(endpoint_name or "built-in default")
+    cost_text = cost_summary if isinstance(cost_summary, str) else str(cost_summary)
     return (
         '<div class="ocr-card" style="margin-top:12px">'
         '<div class="run-summary">'
         f'<span>📦 <b>{html.escape(repo)}</b>#{pr_number}</span>'
         f'<span>🤖 <b>{endpoint_display}</b></span>'
         f'<span>⏱️ <b>{duration:.1f}s</b></span>'
-        f'<span>{cost_summary}</span>'
+        f'<span>💰 {html.escape(cost_text)}</span>'
         "</div>"
         "</div>"
     )
@@ -573,7 +574,7 @@ def _format_session_endpoints() -> str:
     if not eps:
         return (
             '<p class="muted small">No endpoints added in this session yet — '
-            "fill the form above and click <b>Save & use endpoint</b>.</p>"
+            "fill the form above and click <b>Save &amp; use endpoint</b>.</p>"
         )
     cards = "".join(
         f'<div class="endpoint-card">'
@@ -591,7 +592,16 @@ def _format_session_endpoints() -> str:
 
 
 def _probe_endpoint(ep) -> tuple[bool, str]:
-    """Quick connectivity probe for a custom endpoint (no LLM generation)."""
+    """Probe an endpoint and report whether it can serve the pipeline.
+
+    HTTP status codes are classified so a 401/403 is reported as
+    "reachable but the server rejected the key" instead of a misleading
+    "unreachable".  OpenAI-compatible servers that don't implement
+    ``GET /models`` (many vLLM / proxy deployments) fall back to a
+    minimal ``/chat/completions`` call — the real request the pipeline
+    makes — so a blocked /models endpoint no longer looks broken.
+    """
+    import urllib.error as _ur_err
     import urllib.request as _ur
 
     if ep.provider == "google":
@@ -603,21 +613,21 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"[:140]
 
+    def _auth_rejected(exc: _ur_err.HTTPError) -> str:
+        return (
+            f"endpoint is reachable but the server rejected the API key "
+            f"(HTTP {exc.code}) — check the key and auth type"
+        )
+
+    # ── Anthropic ────────────────────────────────────────────────
     if ep.provider == "anthropic":
         base = (ep.base_url or "https://api.anthropic.com/v1").rstrip("/")
         candidates = [f"{base}/models"]
         if not base.endswith("/v1"):
             candidates.append(f"{base}/v1/models")
-    else:  # openai-compatible
-        base = (ep.base_url or "https://api.openai.com/v1").rstrip("/")
-        candidates = [f"{base}/models"]
-        if not base.endswith("/v1"):
-            candidates.append(f"{base}/v1/models")
-
-    last_err = "no response"
-    for url in candidates:
-        try:
-            if ep.provider == "anthropic":
+        last_err = "no models endpoint responded"
+        for url in candidates:
+            try:
                 req = _ur.Request(
                     url,
                     headers={
@@ -625,16 +635,69 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
                         "anthropic-version": "2023-06-01",
                     },
                 )
-            else:
-                req = _ur.Request(
-                    url, headers={"Authorization": f"Bearer {ep.api_key}"}
-                )
-            with _ur.urlopen(req, timeout=10) as resp:
+                with _ur.urlopen(req, timeout=30) as resp:
+                    if resp.status == 200:
+                        return True, f"HTTP 200 · {url}"
+            except _ur_err.HTTPError as exc:
+                if exc.code in (401, 403):
+                    # Same key on every candidate — auth failure is final.
+                    return False, f"{_auth_rejected(exc)} ({url})"
+                hint = " — check base_url (should end in /v1)" if exc.code == 404 else ""
+                last_err = f"reachable but returned HTTP {exc.code} ({url}){hint}"
+            except Exception as exc:
+                return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
+        return False, last_err
+
+    # ── OpenAI-compatible ────────────────────────────────────────
+    base = (ep.base_url or "https://api.openai.com/v1").rstrip("/")
+    candidates = [f"{base}/models"]
+    if not base.endswith("/v1"):
+        candidates.append(f"{base}/v1/models")
+
+    for url in candidates:
+        try:
+            req = _ur.Request(
+                url, headers={"Authorization": f"Bearer {ep.api_key}"}
+            )
+            with _ur.urlopen(req, timeout=30) as resp:
                 if resp.status == 200:
                     return True, f"HTTP 200 · {url}"
+        except _ur_err.HTTPError as exc:
+            if exc.code in (401, 403):
+                # Bad key on /models means chat would fail the same way.
+                return False, f"{_auth_rejected(exc)} ({url})"
         except Exception as exc:
-            last_err = f"{type(exc).__name__}: {exc}"
-    return False, last_err[:140]
+            # Genuinely unreachable — chat probe below would only repeat it.
+            return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
+
+    # /models missing or blocked (404/405/501…) — probe the real call.
+    try:
+        payload = json.dumps({
+            "model": ep.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }).encode()
+        chat_url = f"{base}/chat/completions"
+        req = _ur.Request(
+            chat_url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {ep.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with _ur.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                return True, f"chat/completions OK · {chat_url}"
+            return False, f"reachable but returned HTTP {resp.status} (chat/completions)"
+    except _ur_err.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, f"{_auth_rejected(exc)} (chat/completions)"
+        hint = " — check base_url (should end in /v1)" if exc.code == 404 else ""
+        return False, f"reachable but returned HTTP {exc.code} (chat/completions){hint}"
+    except Exception as exc:
+        return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
 
 
 def test_endpoints() -> str:
@@ -669,7 +732,7 @@ def test_endpoints() -> str:
             f'<div class="endpoint-meta"><code>{ep.model}</code>'
             f' · {ep.base_url or "default URL"} · key {ep.masked_key}</div>'
             f'<div class="endpoint-meta" style="color:{status_color};font-weight:700">'
-            f'{"✅ reachable" if ok else "❌ unreachable"} — {detail}</div>'
+            f'{"✅" if ok else "❌"} {detail}</div>'
             f'</div>'
         )
     return '<div>' + "".join(cards) + '</div>'
@@ -735,7 +798,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     t0 = time.time()
     try:
         state, config, cost_summary, ragas_out = _build_and_stream(
-            repo.strip(), pr_number, endpoint_name, ragas_background=True,
+            repo.strip(), int(pr_number), endpoint_name, ragas_background=True,
         )
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
@@ -890,9 +953,6 @@ def run_smoke(progress=gr.Progress()):
     yield [verdict_html, findings_html + cost_html, config_json, verdict_html, findings_html], None
 
 
-
-
-
 # ─── UI ──────────────────────────────────────────────────────────────────────
 
 CSS = """
@@ -908,57 +968,135 @@ CSS = """
     --text-muted: #64748b;
     --text-footer: #94a3b8;
     --spinner-track: #e2e8f0;
-    --accent: #6366f1;
-    --accent-soft: rgba(99, 102, 241, 0.12);
+    --accent: #52525b;
+    --accent-soft: rgba(82, 82, 91, 0.10);
+    --glass: rgba(255, 255, 255, 0.55);
+    --glass-border: rgba(15, 23, 42, 0.10);
+    --glass-field: rgba(255, 255, 255, 0.72);
+    --glass-edge: rgba(15, 23, 42, 0.18);
+    --glass-hover: rgba(15, 23, 42, 0.05);
+    --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.8);
     --radius: 14px;
     --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 10px 30px rgba(15, 23, 42, 0.06);
 }
 
-/* ── Dark Mode Overrides ─────────────────────────────────────────── */
-body.dark-mode {
-    --bg-page: #0b1220;
-    --bg-card: #131c31;
-    --bg-card-alt: #0f172a;
-    --bg-table-header: #1e293b;
-    --border-color: #2b3a55;
-    --text-primary: #f1f5f9;
-    --text-secondary: #cbd5e1;
-    --text-muted: #94a3b8;
-    --text-footer: #64748b;
-    --spinner-track: #334155;
-    --accent: #818cf8;
-    --accent-soft: rgba(129, 140, 248, 0.15);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.3);
+/* ── Dark Mode — true black, glass surfaces, no blue ────────────── */
+body.dark {
+    --bg-page: #000000;
+    --bg-card: #0a0a0a;
+    --bg-card-alt: #101010;
+    --bg-table-header: #0a0a0a;
+    --border-color: #1f1f1f;
+    --text-primary: #f5f5f5;
+    --text-secondary: #d4d4d4;
+    --text-muted: #8a8a8a;
+    --text-footer: #5c5c5c;
+    --spinner-track: #1c1c1c;
+    --accent: #a1a1aa;
+    --accent-soft: rgba(255, 255, 255, 0.07);
+    --shadow: none;
+    --glass: rgba(255, 255, 255, 0.035);
+    --glass-border: rgba(255, 255, 255, 0.09);
+    --glass-field: rgba(255, 255, 255, 0.045);
+    --glass-edge: rgba(255, 255, 255, 0.12);
+    --glass-hover: rgba(255, 255, 255, 0.12);
+    --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
-body.dark-mode .gradio-container {
-    background: radial-gradient(1200px 500px at 20% -10%, #1e1b4b33, transparent 60%),
-                radial-gradient(1000px 400px at 90% 10%, #17255433, transparent 55%),
-                var(--bg-page) !important;
-}
-body.dark-mode .gr-box,
-body.dark-mode .tabs,
-body.dark-mode .tab-nav {
-    background-color: var(--bg-card) !important;
-    border-color: var(--border-color) !important;
-}
-body.dark-mode input, body.dark-mode textarea, body.dark-mode select {
-    background-color: var(--bg-card-alt) !important;
+/* Glass buttons — replace Gradio's solid blue primary / gray secondary
+   with frosted neutral surfaces (scoped to the app area, not Gradio's
+   own footer controls). */
+.gradio-container main button.primary {
+    background: var(--glass-hover) !important;
     color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
+    border: 1px solid var(--glass-edge) !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(12px) !important;
+    transition: background 0.18s ease, border-color 0.18s ease !important;
 }
-body.dark-mode label { color: var(--text-secondary) !important; }
-body.dark-mode button:not(.lg) { color: var(--text-primary) !important; }
-body.dark-mode .footer { color: var(--text-footer) !important; }
-body.dark-mode details summary { color: var(--text-secondary) !important; }
-body.dark-mode [data-testid="block-info"] { color: var(--text-muted) !important; }
+.gradio-container main button.primary:hover {
+    background: var(--accent-soft) !important;
+    border-color: var(--text-muted) !important;
+}
+.gradio-container main button:not(.primary) {
+    background: var(--glass) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--glass-border) !important;
+    border-radius: 12px !important;
+    font-weight: 500 !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(10px) !important;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease !important;
+}
+.gradio-container main button:not(.primary):hover {
+    background: var(--glass-hover) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--glass-edge) !important;
+}
+/* Frosted input fields in both themes. */
+.gradio-container input, .gradio-container textarea, .gradio-container select {
+    background-color: var(--glass-field) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+body.dark .gradio-container {
+    background: var(--bg-page) !important;
+}
+/* Blend Gradio's component panels into the page: no boxes, no
+   borders — only inputs keep a faint field tint so they stay legible. */
+body.dark .block,
+body.dark .form,
+body.dark .tabs,
+body.dark .tabitem {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+body.dark .tab-nav {
+    border-bottom: 1px solid var(--border-color) !important;
+    background: transparent !important;
+}
+body.dark input, body.dark textarea, body.dark select {
+    background-color: var(--glass-field) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+body.dark label { color: var(--text-secondary) !important; }
+/* Field labels render as small pills in the Soft theme — restyle them
+   as quiet glass chips instead of the default saturated background. */
+label span[data-testid="block-info"],
+span.has-info,
+span[data-testid="block-info"] {
+    background: var(--glass) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--glass-border);
+    border-radius: 9px;
+    padding: 2px 10px;
+    font-weight: 500 !important;
+    backdrop-filter: blur(8px);
+    box-shadow: var(--glass-highlight);
+}
+body.dark button:not(.lg) { color: var(--text-primary) !important; }
+body.dark .footer { color: var(--text-footer) !important; }
+body.dark details summary { color: var(--text-secondary) !important; }
+body.dark [data-testid="block-info"] { color: var(--text-primary) !important; }
 
 /* ── Global ──────────────────────────────────────────────────────── */
+/* Component forms blend into the page in both themes; inputs keep
+   their own field background so they stay clearly interactive. */
+.gradio-container .form {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
 .gradio-container {
     background: radial-gradient(1200px 500px at 20% -10%, #eef2ff66, transparent 60%),
                 radial-gradient(1000px 400px at 90% 10%, #e0f2fe55, transparent 55%),
                 var(--bg-page) !important;
 }
-.gr-container { max-width: 980px; margin: 0 auto; }
+.gradio-container { max-width: 1024px; margin: 0 auto; }
 .footer { text-align: center; color: var(--text-footer); font-size: 0.85em; padding: 22px 0; }
 details { margin-top: 8px; }
 details summary { cursor: pointer; color: var(--text-secondary); font-weight: 500; }
@@ -969,45 +1107,52 @@ code { background: var(--bg-card-alt); padding: 1px 6px; border-radius: 6px; fon
 /* ── Hero ────────────────────────────────────────────────────────── */
 .hero { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
 .hero-icon {
-    font-size: 2.2em; width: 58px; height: 58px; display: flex; align-items: center;
-    justify-content: center; border-radius: 16px;
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
-    box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35);
+    font-size: 1.5em; width: 48px; height: 48px; display: flex; align-items: center;
+    justify-content: center; border-radius: 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-highlight);
+    backdrop-filter: blur(12px);
 }
-.hero-title { margin: 0; font-size: 1.6em; font-weight: 800; letter-spacing: -0.02em; color: var(--text-primary); }
+.hero-title { margin: 0; font-size: 1.35em; font-weight: 650; letter-spacing: -0.015em; color: var(--text-primary); }
 .hero-sub { margin: 2px 0 0; color: var(--text-muted); font-size: 0.95em; }
 
 /* ── Cards ───────────────────────────────────────────────────────── */
 .ocr-card {
-    background: var(--bg-card); border: 1px solid var(--border-color);
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
     border-radius: var(--radius); padding: 16px 20px; margin-top: 12px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-highlight);
+    backdrop-filter: blur(14px);
 }
-.card-title { font-weight: 700; color: var(--text-primary); margin-bottom: 12px; font-size: 1.02em; }
+.card-title { font-weight: 600; color: var(--text-primary); margin-bottom: 12px; font-size: 1.0em; letter-spacing: 0.01em; }
 .chips-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 /* ── Chips / badges ──────────────────────────────────────────────── */
 .key-chip {
     display: inline-block; padding: 3px 12px; border-radius: 999px;
-    font-size: 0.85em; font-weight: 600; border: 1px solid;
+    font-size: 0.82em; font-weight: 500; border: 1px solid var(--glass-border);
+    background: var(--glass); color: var(--text-secondary);
+    backdrop-filter: blur(8px);
 }
-.key-chip.ok { color: #16a34a; background: #16a34a14; border-color: #16a34a44; }
-.key-chip.no { color: var(--text-muted); background: var(--bg-card-alt); border-color: var(--border-color); }
+.key-chip.ok { color: #4ade80; border-color: rgba(74, 222, 128, 0.25); background: rgba(74, 222, 128, 0.07); }
 .sev-chip {
     display: inline-block; padding: 3px 12px; border-radius: 999px;
-    font-size: 0.85em; font-weight: 700; border: 1px solid;
+    font-size: 0.82em; font-weight: 600; border: 1px solid var(--glass-border);
+    background: var(--glass);
 }
 
 /* ── Endpoint cards ──────────────────────────────────────────────── */
 .endpoint-card {
-    border: 1px solid var(--border-color); border-radius: 10px;
-    padding: 10px 14px; margin-bottom: 8px; background: var(--bg-card-alt);
+    border: 1px solid var(--glass-border); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 8px; background: var(--glass);
+    backdrop-filter: blur(10px);
 }
-.endpoint-name { font-weight: 700; color: var(--text-primary); display: flex; gap: 8px; align-items: center; }
+.endpoint-name { font-weight: 600; color: var(--text-primary); display: flex; gap: 8px; align-items: center; }
 .endpoint-badge {
-    font-size: 0.72em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 2px 8px; border-radius: 999px; color: var(--accent);
-    background: var(--accent-soft); border: 1px solid #6366f144;
+    font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 2px 8px; border-radius: 999px; color: var(--text-muted);
+    background: var(--accent-soft); border: 1px solid var(--glass-border);
 }
 .endpoint-meta { margin-top: 4px; font-size: 0.88em; color: var(--text-secondary); }
 
@@ -1043,12 +1188,14 @@ tbody tr:hover { background: var(--bg-card-alt); }
 
 /* ── Theme toggle ────────────────────────────────────────────────── */
 #theme-toggle-btn {
-    float: right; margin-top: 18px !important; background: transparent !important;
-    border: 1px solid var(--border-color) !important; border-radius: 10px !important;
+    float: right; margin-top: 18px !important; background: var(--glass) !important;
+    border: 1px solid var(--glass-border) !important; border-radius: 10px !important;
     padding: 4px 10px !important; font-size: 1.1em !important; min-width: 44px !important;
-    transition: all 0.2s ease !important; box-shadow: none !important;
+    transition: all 0.2s ease !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(10px) !important;
 }
-#theme-toggle-btn:hover { background: var(--bg-card-alt) !important; border-color: var(--text-muted) !important; }
+#theme-toggle-btn:hover { background: var(--accent-soft) !important; border-color: var(--glass-edge) !important; }
 
 /* ── Loading spinner ─────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1064,16 +1211,21 @@ tbody tr:hover { background: var(--bg-card-alt); }
 
 JS_RESTORE_THEME = """
 () => {
-    const isDark = localStorage.getItem("ocr-theme") === "dark";
-    if (isDark) document.body.classList.add("dark-mode");
+    // Single source of truth for the theme: the body.dark class that
+    // Gradio itself also uses for dark mode.  Our own key in localStorage
+    // only records an explicit choice; when absent, whatever Gradio picked
+    // (OS preference) is left untouched.
+    const saved = localStorage.getItem("ocr-theme");
+    if (saved === "dark") document.body.classList.add("dark");
+    if (saved === "light") document.body.classList.remove("dark");
     const btn = document.querySelector("#theme-toggle-btn");
-    if (btn) btn.textContent = isDark ? "☀️" : "🌙";
+    if (btn) btn.textContent = document.body.classList.contains("dark") ? "☀️" : "🌙";
 }
 """
 
 JS_TOGGLE_THEME = """
 () => {
-    const isDark = document.body.classList.toggle("dark-mode");
+    const isDark = document.body.classList.toggle("dark");
     localStorage.setItem("ocr-theme", isDark ? "dark" : "light");
     const btn = document.querySelector("#theme-toggle-btn");
     if (btn) btn.textContent = isDark ? "☀️" : "🌙";
@@ -1102,15 +1254,15 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         with gr.Column(scale=4):
             gr.HTML(
                 '<div class="hero">'
-                '<div class="hero-icon">🔍</div>'
+                '<div class="hero-icon">◈</div>'
                 '<div>'
                 '<h1 class="hero-title">OpenCodeReview</h1>'
                 '<p class="hero-sub">AI-powered PR review with human-in-the-loop approval</p>'
                 f'<div class="chips-row" style="margin-top:8px">'
-                f'<span class="key-chip ok">⚡ {len(_configured_endpoints)} endpoint'
-                f'{"s" if len(_configured_endpoints) != 1 else ""}</span>'
-                '<span class="key-chip" style="color:var(--accent);background:var(--accent-soft);border-color:#6366f144">✨ Gemini · Grok built-ins</span>'
-                '<span class="key-chip" style="color:var(--text-muted);background:var(--bg-card-alt);border-color:var(--border-color)">🔐 BYO keys</span>'
+                f'<span class="key-chip ok">{len(_configured_endpoints)} endpoint'
+                f'{"s" if len(_configured_endpoints) != 1 else ""} configured</span>'
+                '<span class="key-chip">Built-ins: Gemini · Groq</span>'
+                '<span class="key-chip">Bring your own keys</span>'
                 '</div>'
                 '</div>'
                 '</div>'
@@ -1126,8 +1278,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
     # it so review results render immediately instead of waiting on RAGAS.
     ragas_task_state = gr.State(value="")
 
-    # ── Tab: Review a PR ─────────────────────────────────────────────────
-    with gr.Tab("Review a PR"):
+    # ── Tab: Review ──────────────────────────────────────────────────
+    with gr.Tab("Review"):
         with gr.Row():
             repo_input = gr.Textbox(
                 label="Repository",
@@ -1148,8 +1300,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 value="",
                 label="LLM Endpoint",
                 info=(
-                    "Built-in: Gemini & Grok. Pick one, or add your own below. "
-                    "Empty = auto (Gemini → Grok fallback)."
+                    "Built-ins: Gemini and Groq (Groq serves Llama models). "
+                    "Empty = auto (Gemini → Groq fallback)."
                 ),
                 # Grouped optgroup choices make Gradio's strict membership
                 # check reject values that sit inside a group (e.g. a custom
@@ -1159,14 +1311,14 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 allow_custom_value=True,
                 scale=3,
             )
-            test_selected_btn = gr.Button("🔌 Test selected", size="sm", scale=1)
+            test_selected_btn = gr.Button("Test selected", size="sm", scale=1)
         endpoint_test_msg = gr.Markdown()
 
         def on_test_selected(endpoint_name):
             """Probe the currently selected endpoint (built-in or custom)."""
             if not endpoint_name:
                 return (
-                    "ℹ️ Leave the endpoint empty for auto (Gemini → Grok fallback), "
+                    "ℹ️ Leave the endpoint empty for auto (Gemini → Groq fallback), "
                     "or pick one and test it here."
                 )
             from endpoints import get_endpoint
@@ -1191,7 +1343,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         )
 
         # ── Add your own endpoint (BYO key) ─────────────────────────
-        with gr.Accordion("➕ Add custom endpoint (BYO key)", open=False):
+        with gr.Accordion("Add a custom endpoint (BYO key)", open=False):
             with gr.Row():
                 ep_name_input = gr.Textbox(
                     label="Endpoint name",
@@ -1222,15 +1374,15 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 placeholder="sk-...  (stored in memory only, never written to disk)",
             )
             with gr.Row():
-                test_form_btn = gr.Button("🔌 Test this endpoint", size="sm")
-                add_endpoint_btn = gr.Button("💾 Save & use endpoint", variant="primary", size="sm")
-                clear_endpoints_btn = gr.Button("🗑 Clear added endpoints", size="sm")
+                test_form_btn = gr.Button("Test this endpoint", size="sm")
+                add_endpoint_btn = gr.Button("Save & use endpoint", variant="primary", size="sm")
+                clear_endpoints_btn = gr.Button("Clear added endpoints", size="sm")
             endpoint_save_msg = gr.Markdown()
             session_endpoints_display = gr.HTML(value=_format_session_endpoints())
 
         with gr.Row():
-            run_btn = gr.Button("▶ Run Review", variant="primary", size="lg", scale=2)
-            cancel_btn = gr.Button("⏹ Cancel", variant="stop", size="lg", visible=False)
+            run_btn = gr.Button("Run review", variant="primary", size="lg", scale=2)
+            cancel_btn = gr.Button("Cancel", variant="stop", size="lg", visible=False)
 
         loading_box = gr.HTML(
             '<div class="loading-spinner"><div class="spinner"></div>'
@@ -1247,15 +1399,18 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             ragas_display = gr.HTML()
 
             with gr.Row():
-                approve_btn = gr.Button("✅ Approve & Post", variant="primary")
-                reject_btn = gr.Button("❌ Reject", variant="secondary")
+                approve_btn = gr.Button("Approve & post", variant="primary")
+                reject_btn = gr.Button("Reject", variant="secondary")
 
             resume_msg = gr.Markdown()
 
         # ── Event wiring ──────────────────────────────────────────────
         def on_run_click(*args):
             """Generator that clears old state, runs review, shows results."""
-            # Yield initial loading state
+            # Yield initial loading state — must match the 12 outputs of
+            # run_btn.click in order (loading_box, cancel_btn, run_btn,
+            # status_msg, 5 result displays, pr_state, results_panel,
+            # ragas_task_state).
             yield [
                 gr.update(visible=True),
                 gr.update(visible=True, variant="stop"),
@@ -1461,8 +1616,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             ok, detail = _probe_endpoint(cfg)
             icon = "✅" if ok else "❌"
             if ok:
-                return f"{icon} **{name}** (`{model}`) reachable — {detail}"
-            return f"{icon} **{name}** unreachable — {detail}"
+                return f"{icon} **{name}** (`{model}`) — {detail}"
+            return f"{icon} **{name}** — {detail}"
 
         test_form_btn.click(
             fn=on_test_form,
@@ -1476,15 +1631,14 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             outputs=[endpoint_save_msg],
         )
 
-    # ── Tab: Smoke Test ──────────────────────────────────────────────────
-    with gr.Tab("Smoke Test"):
+    # ── Tab: Smoke test ──────────────────────────────────────────────
+    with gr.Tab("Smoke test"):
         gr.Markdown(
-            "Run the review pipeline on **synthetic demo data** "
-            "(no API keys needed, no interrupt required)."
+            "Run the review pipeline on **synthetic demo data** — no API keys needed."
         )
         with gr.Row():
-            smoke_btn = gr.Button("▶ Run Smoke Test", variant="primary", size="lg", scale=2)
-            smoke_cancel_btn = gr.Button("⏹ Cancel", variant="stop", size="lg", visible=False)
+            smoke_btn = gr.Button("Run smoke test", variant="primary", size="lg", scale=2)
+            smoke_cancel_btn = gr.Button("Cancel", variant="stop", size="lg", visible=False)
 
         smoke_loading = gr.HTML(
             '<div class="loading-spinner"><div class="spinner"></div>'
@@ -1496,8 +1650,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             smoke_verdict = gr.HTML()
             smoke_findings = gr.HTML()
             with gr.Row():
-                smoke_approve = gr.Button("✅ Approve (demo)", variant="primary")
-                smoke_reject = gr.Button("❌ Reject (demo)", variant="secondary")
+                smoke_approve = gr.Button("Approve (demo)", variant="primary")
+                smoke_reject = gr.Button("Reject (demo)", variant="secondary")
             smoke_resume_msg = gr.Markdown()
 
         smoke_status = gr.Markdown(visible=False)
@@ -1558,7 +1712,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         )
 
     # ── Environment status footer ──────────────────────────────────────
-    with gr.Accordion("🔑 Configured Keys & Health", open=False):
+    with gr.Accordion("Configured keys & health", open=False):
         h = HealthStatus()
         health_data = h.summary()
         gemini_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
@@ -1600,7 +1754,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 'as Space secrets to add one.</p>'
             )
         with gr.Row():
-            test_endpoints_btn = gr.Button("🔌 Test endpoint connectivity", size="sm", variant="secondary")
+            test_endpoints_btn = gr.Button("Test endpoint connectivity", size="sm", variant="secondary")
         endpoint_test_out = gr.HTML()
         test_endpoints_btn.click(fn=test_endpoints, outputs=[endpoint_test_out])
 
@@ -1615,8 +1769,28 @@ with gr.Blocks(title="OpenCodeReview") as demo:
     )
 
 
+def _resolve_port() -> int:
+    """Resolve the listen port from $PORT, falling back to 7860.
+
+    HF Spaces always sets a valid $PORT, but locally the variable may be
+    empty or even 0 (e.g. inherited from an unrelated shell profile) —
+    binding port 0 makes Gradio's post-launch self-check fail with a
+    confusing connection traceback, so invalid values are rejected here.
+    """
+    raw = (os.environ.get("PORT") or "").strip()
+    try:
+        port = int(raw) if raw else 7860
+    except ValueError:
+        logger.warning("Ignoring non-numeric PORT=%r — using 7860", raw)
+        return 7860
+    if not 1 <= port <= 65535:
+        logger.warning("Ignoring out-of-range PORT=%d — using 7860", port)
+        return 7860
+    return port
+
+
 def main() -> None:
-    port = int(os.environ.get("PORT", 7860))
+    port = _resolve_port()
     # Gradio 6: theme/css moved from the Blocks constructor to launch().
     demo.queue(max_size=10).launch(
         server_name="0.0.0.0",

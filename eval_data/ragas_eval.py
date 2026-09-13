@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,93 @@ def _check_ragas() -> bool:
     return _RAGAS_AVAILABLE
 
 
+# Seconds to sleep before every RAGAS LLM call. RAGAS scoring fires a
+# burst of ~20-30 model calls per review (context-precision judgments,
+# faithfulness verification, answer relevancy, MMR relevance checks).
+# Spacing them keeps the burst under Groq/Gemini free-tier per-minute rate
+# limits so scoring completes instead of tripping 429s — which previously
+# caused long retry backoffs and 0.0000 scores. Override with the
+# OCR_RAGAS_INTERVAL env var (float seconds, 0 disables).
+_RAGAS_INTERVAL = float(os.environ.get("OCR_RAGAS_INTERVAL", "3.0") or 3.0)
+_ragas_throttle_lock = threading.Lock()
+
+
+class _ThrottledChatModel:
+    """Wrap a LangChain chat model so every underlying API call RAGAS makes
+    is spaced by a fixed interval.
+
+    RAGAS's ``LangchainLLMWrapper`` (deprecated shim in 0.4.x, forwards to
+    the langchain model) and the custom MMR path call the model through
+    different entry points (sync/async, single/batched).  Intercepting
+    ``invoke`` / ``generate`` / ``ainvoke`` / ``agenerate`` here guarantees
+    every request is throttled regardless of ragas version.
+    """
+
+    def __init__(self, model, interval: float | None = None):
+        self._model = model
+        self._interval = _RAGAS_INTERVAL if interval is None else interval
+
+    def _wait(self) -> None:
+        if self._interval > 0:
+            with _ragas_throttle_lock:
+                time.sleep(self._interval)
+
+    # ── Sync entry points ───────────────────────────────────────────────
+    def invoke(self, *args, **kwargs):
+        self._wait()
+        return self._model.invoke(*args, **kwargs)
+
+    def generate(self, messages, *args, **kwargs):
+        # Serialize LangChain batch calls into individual throttled
+        # requests so every underlying API call is spaced by the interval.
+        if (
+            isinstance(messages, list)
+            and messages
+            and isinstance(messages[0], list)
+        ):
+            from langchain_core.outputs import Generation, LLMResult
+
+            generations = []
+            for msgs in messages:
+                self._wait()
+                # invoke() does not accept callbacks/run_manager/config that
+                # ragas may forward to generate() — drop them here.
+                resp = self._model.invoke(msgs)
+                text = resp.content if hasattr(resp, "content") else str(resp)
+                generations.append([Generation(text=text, message=resp)])
+            return LLMResult(generations=generations, llm_output=None)
+        self._wait()
+        return self._model.generate(messages, *args, **kwargs)
+
+    # ── Async entry points ──────────────────────────────────────────────
+    async def ainvoke(self, *args, **kwargs):
+        self._wait()
+        return await self._model.ainvoke(*args, **kwargs)
+
+    async def agenerate(self, messages, *args, **kwargs):
+        if (
+            isinstance(messages, list)
+            and messages
+            and isinstance(messages[0], list)
+        ):
+            from langchain_core.outputs import Generation, LLMResult
+
+            generations = []
+            for msgs in messages:
+                self._wait()
+                # Same kwargs caveat as generate(): ainvoke has no callbacks.
+                resp = await self._model.ainvoke(msgs)
+                text = resp.content if hasattr(resp, "content") else str(resp)
+                generations.append([Generation(text=text, message=resp)])
+            return LLMResult(generations=generations, llm_output=None)
+        self._wait()
+        return await self._model.agenerate(messages, *args, **kwargs)
+
+    # ── Everything else passes through ──────────────────────────────────
+    def __getattr__(self, name: str):
+        return getattr(self._model, name)
+
+
 def _get_evaluator_llm(endpoint: Optional[str] = None):
     """Return a RAGAS-compatible LLM, reusing the project's LLM factory.
 
@@ -82,26 +171,30 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 
             llm = create_llm(endpoint=endpoint, temperature=0)
             logger.info("RAGAS evaluator: using custom endpoint %s", endpoint)
-            return LangchainLLMWrapper(llm)
+            return LangchainLLMWrapper(_ThrottledChatModel(llm))
 
         from llm_factory import _get_groq_chat, _get_gemini_chat
 
-        llm = _get_groq_chat(temperature=0)
+        # max_retries=5: residual 429s (rate limit) retry instead of failing
+        # a metric; combined with the throttle below, the burst stays under
+        # the provider's per-minute limit so retries are the exception.
+        llm = _get_groq_chat(temperature=0, max_retries=5)
         if llm is None:
             logger.info(
                 "RAGAS evaluator: GROQ_API_KEY not set — falling back to Gemini"
             )
-            llm = _get_gemini_chat(temperature=0)
+            llm = _get_gemini_chat(temperature=0, max_retries=5)
         if llm is None:
             raise ValueError(
                 "No LLM available for RAGAS scoring. "
                 "Set GROQ_API_KEY (preferred) or GEMINI_API_KEY."
             )
         logger.info(
-            "RAGAS evaluator: using %s",
+            "RAGAS evaluator: using %s (throttled %ss)",
             type(llm).__name__,
+            _RAGAS_INTERVAL,
         )
-        return LangchainLLMWrapper(llm)
+        return LangchainLLMWrapper(_ThrottledChatModel(llm))
     except ValueError as exc:
         logger.warning("RAGAS evaluator: %s", exc)
         raise RuntimeError(
@@ -392,6 +485,11 @@ def _compute_mmr(
             # LangchainLLMWrapper stores the model as .langchain_llm in ragas
             # 0.4.x and as .llm in 0.3.x — accept both.
             langchain_model = getattr(llm, "langchain_llm", None) or getattr(llm, "llm", None)
+            # Space the relevance judgments too — this unwrapped path bypasses
+            # the model wrapper on some ragas versions, so sleep explicitly
+            # (unless the wrapper is already in the path, to avoid double-sleep).
+            if not isinstance(langchain_model, _ThrottledChatModel):
+                time.sleep(_RAGAS_INTERVAL)
             raw = langchain_model.invoke(prompt)
             response_text = raw.content.strip().upper() if hasattr(raw, "content") else str(raw).strip().upper()
             if response_text.startswith("Y"):
