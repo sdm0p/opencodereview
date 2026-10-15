@@ -54,6 +54,9 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_job(job_id: str, request: ReviewRequest) -> None:
+    with _lock:
+        if job_id in _jobs:
+            _jobs[job_id]["status"] = "processing"
     try:
         state, config, cost, _ = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
         verdict: Verdict | None = state.values.get("verdict")

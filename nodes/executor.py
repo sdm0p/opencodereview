@@ -208,12 +208,12 @@ def executor_node(state: OpenCodeReviewState) -> dict:
     """
     if not state.human_approved:
         logger.info("Not approved \u2014 skipping executor")
-        return {}
+        return {"posting_result": {"status": "skipped", "reason": "not_approved"}}
 
     parts = state.repo.split("/")
     if len(parts) != 2:
         logger.warning("Cannot post results: invalid repo '%s'", state.repo)
-        return {}
+        return {"posting_result": {"status": "failed", "reason": "invalid_repo"}}
     owner, repo_name = parts
     pr_number = state.pr_number
 
@@ -234,7 +234,7 @@ def executor_node(state: OpenCodeReviewState) -> dict:
                 f.file_path, f.line_start, f.line_end,
                 f.severity.value, f.comment[:60],
             )
-        return {}
+        return {"posting_result": {"status": "dry_run", "inline_posted": 0, "fallback_posted": 0, "failed": len(state.final_findings)}}
 
     # ── 1. Fetch latest head SHA ─────────────────────────────────────────
     commit_id = _fetch_pr_head_sha(owner, repo_name, pr_number)
@@ -281,9 +281,10 @@ def executor_node(state: OpenCodeReviewState) -> dict:
             fallback_ok += 1
 
     # ── 3. Post the verdict ──────────────────────────────────────────────
+    verdict_posted = False
     if state.verdict:
         verdict_body = _verdict_body(state.verdict.model_dump())
-        _post_issue_comment(owner, repo_name, pr_number, verdict_body)
+        verdict_posted = _post_issue_comment(owner, repo_name, pr_number, verdict_body)
 
     total = len(state.final_findings)
     logger.info(
@@ -293,4 +294,25 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         "posted" if state.verdict else "skipped",
         owner, repo_name, pr_number,
     )
-    return {}
+    failed = total - inline_ok - fallback_ok
+    # A review is fully posted only when every finding and the verdict were
+    # accepted by GitHub. Keep the per-part counts so the API/UI can explain a
+    # partial result instead of reporting a misleading success.
+    successful_parts = inline_ok + fallback_ok + int(verdict_posted)
+    expected_parts = total + int(state.verdict is not None)
+    if expected_parts == 0:
+        status = "posted"
+    elif successful_parts == expected_parts:
+        status = "posted"
+    elif successful_parts:
+        status = "partially_posted"
+    else:
+        status = "post_failed"
+    return {"posting_result": {
+        "status": status,
+        "total_findings": total,
+        "inline_posted": inline_ok,
+        "fallback_posted": fallback_ok,
+        "failed": failed,
+        "verdict_posted": verdict_posted,
+    }}
