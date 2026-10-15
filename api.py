@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import json
+import secrets
 import sqlite3
 import threading
 import uuid
@@ -71,7 +72,13 @@ class DecisionRequest(BaseModel):
 
 def _authorize(token: str | None) -> None:
     expected = os.getenv("OCR_API_KEY", "").strip()
-    if expected and token != expected:
+    # Authentication is opt-in for local development, but deployments can
+    # require it explicitly.  Never silently treat a missing production key
+    # as authenticated.
+    require_auth = os.getenv("OCR_REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if require_auth and not expected:
+        raise HTTPException(status_code=503, detail="API authentication is not configured")
+    if expected and (not token or not secrets.compare_digest(token, expected)):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
