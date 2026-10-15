@@ -82,7 +82,13 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
 def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
     result = _public_job(job)
     task_id = result.get("ragas_task_id")
-    if task_id:
+    if not task_id:
+        result["ragas"] = {
+            "status": "skipped",
+            "scores": result.get("ragas_scores") or {},
+            "reason": "No retrieval context was available for RAGAS evaluation",
+        }
+    else:
         with _ragas_lock:
             task = _ragas_tasks.get(task_id)
         if not task:
