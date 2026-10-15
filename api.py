@@ -106,7 +106,12 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
             else:
                 result["ragas"] = {"status": "unavailable", "error": "RAGAS task was lost during process restart"}
         elif not task.get("done"):
-            result["ragas"] = {"status": "pending"}
+            timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
+            started = float(task.get("started", 0) or 0)
+            if started and datetime.now(timezone.utc).timestamp() - started > timeout:
+                result["ragas"] = {"status": "failed", "error": f"RAGAS exceeded {int(timeout)} second timeout"}
+            else:
+                result["ragas"] = {"status": "pending"}
         elif task.get("error"):
             result["ragas"] = {"status": "failed", "error": task.get("error")}
         else:
