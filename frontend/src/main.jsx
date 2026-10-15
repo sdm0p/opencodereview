@@ -26,7 +26,9 @@ function Receipt({ result }) {
   return <section className="result-card receipt" aria-labelledby="receipt-title"><span className="panel-kicker">Delivery receipt</span><h3 id="receipt-title">{pretty(result.status || "completed")}</h3><div className="metrics"><span>Inline: {result.inline_posted || 0}</span><span>Fallback: {result.fallback_posted || 0}</span><span>Failed: {result.failed || 0}</span></div></section>;
 }
 
-function Ragas({ ragas }) { if (!ragas) return null; const text = ragas.status === "pending" ? "Computing scores in the background…" : ragas.status === "failed" ? "Scoring failed" : Object.entries(ragas.scores || {}).map(([key, value]) => `${key}: ${typeof value === "number" ? value.toFixed(3) : value}`).join(" · ") || "Completed without scores"; return <section className="result-card receipt" aria-label="RAGAS retrieval quality"><span className="panel-kicker">Retrieval quality (RAGAS)</span><p>{text}</p></section>; }\n\nfunction App() {
+function Ragas({ ragas }) { if (!ragas) return null; const text = ragas.status === "pending" ? "Computing scores in the background…" : ragas.status === "failed" ? "Scoring failed" : Object.entries(ragas.scores || {}).map(([key, value]) => `${key}: ${typeof value === "number" ? value.toFixed(3) : value}`).join(" · ") || "Completed without scores"; return <section className="result-card receipt" aria-label="RAGAS retrieval quality"><span className="panel-kicker">Retrieval quality (RAGAS)</span><p>{text}</p></section>; }
+
+function App() {
   const [repo, setRepo] = useState(""); const [pr, setPr] = useState(""); const [endpoint, setEndpoint] = useState("auto");
   const [job, setJob] = useState(null); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
   const isTerminal = useMemo(() => TERMINAL.has(job?.status), [job?.status]);
