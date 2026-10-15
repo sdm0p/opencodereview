@@ -506,11 +506,20 @@ def _ragas_worker(
     handler,
 ) -> None:
     """Daemon thread body: compute scores, stash them for the Timer poll."""
-    scores = _compute_and_log_ragas(inputs, repo, pr_number, run_trace_id, handler)
+    try:
+        scores = _compute_and_log_ragas(inputs, repo, pr_number, run_trace_id, handler)
+    except Exception as exc:
+        logger.warning("RAGAS worker failed: %s", exc)
+        with _ragas_lock:
+            entry = _ragas_tasks.get(task_id)
+            if entry is not None:
+                entry["error"] = str(exc)[:500]
+                entry["done"] = True
+        return
     with _ragas_lock:
         entry = _ragas_tasks.get(task_id)
         if entry is not None:
-            entry["scores"] = scores
+            entry["scores"] = scores or {}
             entry["done"] = True
     # Ship the Langfuse scores logged from this thread.
     flush_langfuse()

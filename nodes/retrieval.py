@@ -484,6 +484,13 @@ def retrieval_node(state: OpenCodeReviewState) -> dict:
         logger.info("No diff available — skipping retrieval")
         return {}
 
+    # Hosted deployments must not download or execute embedding models on the
+    # application machine. Enable this only on a machine intentionally sized
+    # for local retrieval; the review itself always uses a remote LLM provider.
+    if os.getenv("OPENCODEREVIEW_ALLOW_LOCAL_EMBEDDINGS", "false").lower() not in {"1", "true", "yes"}:
+        logger.info("Local embeddings disabled; skipping vector retrieval")
+        return {}
+
     # -- Parse identifiers ----------------------------------------------------
     parts = state.repo.split("/")
     if len(parts) != 2:

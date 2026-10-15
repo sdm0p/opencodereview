@@ -53,6 +53,11 @@ def _load_job(job_id: str) -> dict[str, Any] | None:
         row = conn.execute("SELECT payload FROM review_jobs WHERE id = ?", (job_id,)).fetchone()
     return json.loads(row[0]) if row else None
 
+def _load_jobs() -> list[dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT payload FROM review_jobs").fetchall()
+    return [json.loads(row[0]) for row in rows]
+
 
 class ReviewRequest(BaseModel):
     repo: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
@@ -85,7 +90,11 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
         elif task.get("error"):
             result["ragas"] = {"status": "failed", "error": task.get("error")}
         else:
-            result["ragas"] = {"status": "completed", "scores": task.get("scores")}
+            scores = task.get("scores") or {}
+            if scores:
+                result["ragas"] = {"status": "completed", "scores": scores}
+            else:
+                result["ragas"] = {"status": "completed_no_scores", "scores": {}, "error": "RAGAS completed without metric values"}
     return result
 
 
@@ -105,6 +114,35 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
         with _lock:
             _jobs[job_id].update(status="failed", error=str(exc)[:500])
             _save_job(_jobs[job_id])
+
+
+def _hydrate_jobs() -> None:
+    """Restore persisted jobs after a process restart and resume interrupted work."""
+    for persisted in _load_jobs():
+        job_id = persisted.get("id")
+        if not job_id:
+            continue
+        status = persisted.get("status")
+        _jobs[job_id] = persisted
+        if status in {"queued", "processing", "processing_decision"}:
+            # Decision processing cannot be safely replayed without an explicit
+            # user action; review execution can be resumed idempotently.
+            if status == "processing_decision":
+                _jobs[job_id]["status"] = "awaiting_approval"
+                _save_job(_jobs[job_id])
+                continue
+            try:
+                request = ReviewRequest(repo=persisted["repo"], pr_number=int(persisted["pr_number"]), endpoint=persisted.get("endpoint"))
+            except Exception:
+                _jobs[job_id].update(status="failed", error="Persisted job request is invalid")
+                _save_job(_jobs[job_id])
+                continue
+            _jobs[job_id]["status"] = "queued"
+            _save_job(_jobs[job_id])
+            _jobs[job_id]["future"] = _executor.submit(_run_job, job_id, request)
+
+
+_hydrate_jobs()
 
 
 @app.get("/api/health")
