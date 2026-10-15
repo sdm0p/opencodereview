@@ -91,7 +91,7 @@ RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app \
 # Override CMD for CLI usage:
 #   docker run --rm opencodereview python -m main review --smoke
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["sh", "-c", "uvicorn combined_server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["uvicorn", "combined_server:app", "--host", "0.0.0.0", "--port", "7860"]
 
 # -- Stage 3: Full runtime (includes sentence-transformers for embeddings) -----
 # Build with: docker build --target runtime-full -t opencodereview:full .
