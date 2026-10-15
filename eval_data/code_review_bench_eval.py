@@ -41,17 +41,26 @@ def main() -> None:
     ap.add_argument("--output", type=Path, default=Path("eval_data/code_review_bench_results.json"))
     ap.add_argument("--max-rows", type=int)
     args = ap.parse_args()
-    preds = {str(x.get("task_id") or x.get("id") or x.get("pr_url") or f"{x.get('repo')}#{x.get('pr_number')}"): x for x in (json.loads(line) for line in args.predictions.read_text(encoding="utf-8").splitlines() if line.strip())}
+    preds = {str(x.get("task_id") or x.get("id") or f"{x.get('pr_url')}#{x.get('issue_index', 0)}" or f"{x.get('repo')}#{x.get('pr_number')}"): x for x in (json.loads(line) for line in args.predictions.read_text(encoding="utf-8").splitlines() if line.strip())}
     try:
         from datasets import load_dataset
     except ImportError as exc:
         raise SystemExit("Install datasets first: pip install datasets") from exc
-    rows = load_dataset("code-review-bench/code-review-bench", split="offline", streaming=True)
+    # The Hub default config combines online and offline parquet schemas, so
+    # load the offline golden file directly.
+    from huggingface_hub import hf_hub_download
+    import pyarrow.parquet as pq
+    offline_path = hf_hub_download(
+        "code-review-bench/code-review-bench",
+        filename="offline_golden_issues.parquet",
+        repo_type="dataset",
+    )
+    rows = pq.read_table(offline_path).to_pylist()
     totals = {"rows": 0, "gold_findings": 0, "pred_findings": 0, "matched": 0, "false_positives": 0, "missed": 0}
     failures = []
     for row in rows:
         if args.max_rows and totals["rows"] >= args.max_rows: break
-        key = str(row.get("task_id") or row.get("id") or row.get("pr_url") or f"{row.get('repo')}#{row.get('pr_number')}")
+        key = str(row.get("task_id") or row.get("id") or f"{row.get('pr_url')}#{row.get('issue_index', 0)}" or f"{row.get('repo')}#{row.get('pr_number')}")
         pred = preds.get(key, {"findings": []})
         gold = issue_fields(row)
         generated = pred.get("findings") or []
