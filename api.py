@@ -173,8 +173,19 @@ _hydrate_jobs()
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    provider_configured = any(
+        os.getenv(name, "").strip()
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+    )
+    require_auth = os.getenv("OCR_REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return {
+        "status": "ok",
+        "inference": "remote_provider_configured" if provider_configured else "fallback_or_unconfigured",
+        "authentication": "required" if require_auth else "optional",
+        "persistence": "configured_path" if os.getenv("OPENCODEREVIEW_DB_PATH") else "local_default_path",
+        "local_embeddings": False,
+    }
 
 
 @app.post("/api/reviews", status_code=202)
