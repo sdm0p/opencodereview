@@ -403,6 +403,9 @@ def _create_ragas_embeddings():
     ``ResponseRelevancy`` can compute cosine similarity between embeddings.
     The underlying ONNX model is cached globally and loads in <1 s.
     """
+    if os.getenv("OPENCODEREVIEW_ALLOW_LOCAL_EMBEDDINGS", "false").lower() not in {"1", "true", "yes"}:
+        logger.info("Local RAGAS embeddings disabled; skipping answer relevancy")
+        return None
     try:
         from chromadb.utils import embedding_functions
 
