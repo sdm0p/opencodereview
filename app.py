@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import json
+import ipaddress
 import logging
 import os
 import threading
@@ -82,6 +83,10 @@ RECOMMENDATION_ICONS = {
 # placeholder support, so a real choice is displayed and mapped back to
 # the "" (auto) sentinel wherever the value enters the pipeline.
 AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq fallback)"
+
+
+def _normalize_endpoint_name(endpoint_name: str | None) -> str:
+    return "" if endpoint_name == AUTO_ENDPOINT_CHOICE else (endpoint_name or "")
 
 
 # ─── Orchestration ───────────────────────────────────────────────────────────
@@ -240,15 +245,19 @@ def _format_findings_table(findings: list) -> str:
     rows: list[str] = []
     for f in findings:
         color = SEVERITY_COLORS.get(f.severity.value, "#666")
+        severity = html.escape(f.severity.value.upper())
+        category = html.escape(str(f.category))
+        location = html.escape(f"{f.file_path}:{f.line_start}–{f.line_end}")
+        comment = html.escape(str(f.comment))
         rows.append(
             f"<tr>"
             f'<td><span style="display:inline-block;padding:2px 10px;'
             f'border-radius:12px;background:{color}22;'
             f'color:{color};font-weight:700;font-size:0.85em">'
-            f"{f.severity.value.upper()}</span></td>"
-            f"<td>{f.category}</td>"
-            f'<td><code>{f.file_path}:{f.line_start}–{f.line_end}</code></td>'
-            f"<td>{f.comment}</td>"
+             f"{severity}</span></td>"
+             f"<td>{category}</td>"
+             f"<td><code>{location}</code></td>"
+             f"<td>{comment}</td>"
             f'<td style="text-align:center">{f.confidence:.0%}</td>'
             f"</tr>"
         )
@@ -309,7 +318,7 @@ def _format_verdict(verdict: Verdict | None) -> str:
         f'<span class="verdict-score">Score <b>{verdict.overall_score:.1f}</b>/10</span>'
         "</div>"
         f'<div class="score-track"><div class="score-fill" style="width:{pct}%;background:{color}"></div></div>'
-        f'<p class="verdict-summary">{verdict.summary}</p>'
+        f'<p class="verdict-summary">{html.escape(str(verdict.summary))}</p>'
         + chips_html
         + "</div>"
     )
@@ -584,7 +593,7 @@ def _format_session_endpoints() -> str:
     cards = "".join(
         f'<div class="endpoint-card">'
         f'<div class="endpoint-name">{html.escape(ep.name)}'
-        f'<span class="endpoint-badge">{ep.provider}</span></div>'
+        f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
         f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
         f' · {html.escape(ep.base_url or "default URL")} · key {ep.masked_key}</div>'
         f'</div>'
@@ -608,6 +617,34 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
     """
     import urllib.error as _ur_err
     import urllib.request as _ur
+    from urllib.parse import urlsplit
+
+    def _safe_base_url(raw_url: str | None, default: str) -> tuple[str | None, str | None]:
+        """Allow only public HTTP(S) endpoints; never forward keys to private hosts."""
+        value = (raw_url or default).strip().rstrip("/")
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                return None, "base URL must use http(s) and include a hostname"
+            if parsed.username or parsed.password:
+                return None, "base URL must not contain embedded credentials"
+            addresses = {item[4][0] for item in __import__("socket").getaddrinfo(parsed.hostname, parsed.port, type=__import__("socket").SOCK_STREAM)}
+            for address in addresses:
+                ip = ipaddress.ip_address(address)
+                if not ip.is_global:
+                    return None, "base URL resolves to a private or otherwise non-public address"
+        except Exception as exc:
+            return None, f"invalid or unresolvable base URL: {type(exc).__name__}"
+        return value, None
+
+    class _NoRedirect(_ur.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    _opener = _ur.build_opener(_NoRedirect)
+
+    def _open(req):
+        return _opener.open(req, timeout=15)
 
     if ep.provider == "google":
         try:
@@ -626,7 +663,9 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
 
     # ── Anthropic ────────────────────────────────────────────────
     if ep.provider == "anthropic":
-        base = (ep.base_url or "https://api.anthropic.com/v1").rstrip("/")
+        base, error = _safe_base_url(ep.base_url, "https://api.anthropic.com/v1")
+        if error:
+            return False, error
         candidates = [f"{base}/models"]
         if not base.endswith("/v1"):
             candidates.append(f"{base}/v1/models")
@@ -640,7 +679,7 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
                         "anthropic-version": "2023-06-01",
                     },
                 )
-                with _ur.urlopen(req, timeout=30) as resp:
+                with _open(req) as resp:
                     if resp.status == 200:
                         return True, f"HTTP 200 · {url}"
             except _ur_err.HTTPError as exc:
@@ -654,7 +693,9 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
         return False, last_err
 
     # ── OpenAI-compatible ────────────────────────────────────────
-    base = (ep.base_url or "https://api.openai.com/v1").rstrip("/")
+    base, error = _safe_base_url(ep.base_url, "https://api.openai.com/v1")
+    if error:
+        return False, error
     candidates = [f"{base}/models"]
     if not base.endswith("/v1"):
         candidates.append(f"{base}/v1/models")
@@ -664,7 +705,7 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
             req = _ur.Request(
                 url, headers={"Authorization": f"Bearer {ep.api_key}"}
             )
-            with _ur.urlopen(req, timeout=30) as resp:
+            with _open(req) as resp:
                 if resp.status == 200:
                     return True, f"HTTP 200 · {url}"
         except _ur_err.HTTPError as exc:
@@ -692,7 +733,7 @@ def _probe_endpoint(ep) -> tuple[bool, str]:
             },
             method="POST",
         )
-        with _ur.urlopen(req, timeout=30) as resp:
+        with _open(req) as resp:
             if resp.status == 200:
                 return True, f"chat/completions OK · {chat_url}"
             return False, f"reachable but returned HTTP {resp.status} (chat/completions)"
@@ -719,10 +760,10 @@ def test_endpoints() -> str:
         if ep.builtin and not ep.api_key:
             cards.append(
                 f'<div class="endpoint-card">'
-                f'<div class="endpoint-name">{ep.name}'
-                f'<span class="endpoint-badge">{ep.provider}</span></div>'
-                f'<div class="endpoint-meta"><code>{ep.model}</code>'
-                f' · {ep.base_url or "default URL"} · key {ep.masked_key}</div>'
+                f'<div class="endpoint-name">{html.escape(ep.name)}'
+                f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
+                f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+                f' · {html.escape(ep.base_url or "default URL")} · key {html.escape(ep.masked_key)}</div>'
                 f'<div class="endpoint-meta" style="color:var(--text-muted);font-weight:700">'
                 f'⏭️ key not set (add GEMINI_API_KEY / GROQ_API_KEY)</div>'
                 f'</div>'
@@ -732,12 +773,12 @@ def test_endpoints() -> str:
         status_color = "#16a34a" if ok else "#dc2626"
         cards.append(
             f'<div class="endpoint-card">'
-            f'<div class="endpoint-name">{ep.name}'
-            f'<span class="endpoint-badge">{ep.provider}</span></div>'
-            f'<div class="endpoint-meta"><code>{ep.model}</code>'
-            f' · {ep.base_url or "default URL"} · key {ep.masked_key}</div>'
+            f'<div class="endpoint-name">{html.escape(ep.name)}'
+            f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
+            f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+            f' · {html.escape(ep.base_url or "default URL")} · key {html.escape(ep.masked_key)}</div>'
             f'<div class="endpoint-meta" style="color:{status_color};font-weight:700">'
-            f'{"✅" if ok else "❌"} {detail}</div>'
+            f'{"✅" if ok else "❌"} {html.escape(detail)}</div>'
             f'</div>'
         )
     return '<div>' + "".join(cards) + '</div>'
@@ -774,10 +815,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
         yield [None, None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
         return
 
-    # The UI may pass the display default; map it to the "" auto sentinel
-    # before any endpoint lookup (get_endpoint would raise on the label).
-    if endpoint_name == AUTO_ENDPOINT_CHOICE:
-        endpoint_name = ""
+    endpoint_name = _normalize_endpoint_name(endpoint_name)
 
     # Fail fast on an unknown endpoint name (allow_custom_value lets any
     # string through the dropdown; the reviewer nodes would otherwise
@@ -858,7 +896,12 @@ def resume_review(config_json: str, action: str, progress=gr.Progress()):
     if not config_json:
         return "ℹ️ No pending review to resume. Run a review first."
 
-    config = json.loads(config_json)
+    try:
+        config = json.loads(config_json)
+        if not isinstance(config, dict):
+            raise ValueError("pending review state must be a JSON object")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return f"❌ Invalid pending review state: {html.escape(str(exc))}"
     graph = build_graph(DB_PATH)
     handler = get_langfuse_handler()
     cost_tracker = TokenCostCallback()
@@ -1050,13 +1093,7 @@ body.dark {
     border-color: var(--glass-edge) !important;
     backdrop-filter: blur(8px);
 }
-/* Dropdowns are not native <select>: the visible box is the theme's
-   div.wrap (opaque --input-background-fill) holding a borderless input.
-   Painting only input/textarea/select filled just the inner input and
-   left the wrap dark — the "lighter rectangle inside a darker box" bug.
-   Tag dropdowns with the "glass-dropdown" elem class and paint their
-   wrap so they read as one uniform glass field, visually identical to
-   the Repository / PR # textboxes. */
+/* Fill the dropdown wrapper so it reads as one glass field. */
 .gradio-container .glass-dropdown .wrap {
     background-color: var(--glass-field) !important;
     border-color: var(--glass-edge) !important;
@@ -1085,12 +1122,8 @@ body.dark input, body.dark textarea, body.dark select {
     border-color: var(--glass-edge) !important;
     backdrop-filter: blur(8px);
 }
-/* Same wrap-fill fix for dark mode (see light-mode rule above). */
 body.dark .gradio-container .glass-dropdown .wrap {
-    background-color: var(--glass-field) !important;
     color: var(--text-primary) !important;
-    border-color: var(--glass-edge) !important;
-    backdrop-filter: blur(8px);
 }
 body.dark label { color: var(--text-secondary) !important; }
 /* Field labels render as small pills in the Soft theme — restyle them
@@ -1325,14 +1358,12 @@ with gr.Blocks(title="OpenCodeReview") as demo:
 
         with gr.Row():
             endpoint_input = gr.Dropdown(
-                # The "" sentinel stays first in the choices so the
-                # AUTO_ENDPOINT_CHOICE default is always a valid member.
                 choices=[""] + dropdown_choices(),
                 value=AUTO_ENDPOINT_CHOICE,
                 label="LLM Endpoint",
                 info=(
                     "Built-ins: Gemini and Groq (Groq serves Llama models). "
-                    f"Default '{AUTO_ENDPOINT_CHOICE}' = Gemini → Groq fallback."
+                    "Defaults to Gemini → Groq fallback."
                 ),
                 # Grouped optgroup choices make Gradio's strict membership
                 # check reject values that sit inside a group (e.g. a custom
@@ -1348,9 +1379,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
 
         def on_test_selected(endpoint_name):
             """Probe the currently selected endpoint (built-in or custom)."""
-            # Map the display default back to the "" (auto) sentinel.
-            if endpoint_name == AUTO_ENDPOINT_CHOICE:
-                endpoint_name = ""
+            endpoint_name = _normalize_endpoint_name(endpoint_name)
             if not endpoint_name:
                 return (
                     "ℹ️ Leave the endpoint empty for auto (Gemini → Groq fallback), "
@@ -1360,16 +1389,16 @@ with gr.Blocks(title="OpenCodeReview") as demo:
 
             ep = get_endpoint(endpoint_name)
             if ep is None:
-                return f"❌ Endpoint '{endpoint_name}' not found — add it in the form below first."
+                return f"❌ Endpoint '{html.escape(endpoint_name)}' not found — add it in the form below first."
             if ep.builtin and not ep.api_key:
                 key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
                 return (
-                    f"⏭️ **{ep.name}** key is not set — add `{key_var}` "
+                    f"⏭️ **{html.escape(ep.name)}** key is not set — add `{html.escape(key_var)}` "
                     "as a Space secret to test it."
                 )
             ok, detail = _probe_endpoint(ep)
             icon = "✅" if ok else "❌"
-            return f"{icon} **{ep.name}** (`{ep.model}`): {detail}"
+            return f"{icon} **{html.escape(ep.name)}** (`{html.escape(ep.model)}`): {html.escape(detail)}"
 
         test_selected_btn.click(
             fn=on_test_selected,
@@ -1443,11 +1472,9 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         # ── Event wiring ──────────────────────────────────────────────
         def on_run_click(*args):
             """Generator that clears old state, runs review, shows results."""
-            # Map the dropdown's display default back to the "" (auto)
-            # sentinel expected by the pipeline (endpoint == "" → built-in
-            # with Gemini → Groq fallback).
             args = tuple(
-                "" if a == AUTO_ENDPOINT_CHOICE else a for a in args
+                _normalize_endpoint_name(a) if isinstance(a, str) else a
+                for a in args
             )
             # Yield initial loading state — must match the 12 outputs of
             # run_btn.click in order (loading_box, cancel_btn, run_btn,
@@ -1658,8 +1685,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             ok, detail = _probe_endpoint(cfg)
             icon = "✅" if ok else "❌"
             if ok:
-                return f"{icon} **{name}** (`{model}`) — {detail}"
-            return f"{icon} **{name}** — {detail}"
+                return f"{icon} **{html.escape(name)}** (`{html.escape(model)}`) — {html.escape(detail)}"
+            return f"{icon} **{html.escape(name)}** — {html.escape(detail)}"
 
         test_form_btn.click(
             fn=on_test_form,
@@ -1776,7 +1803,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             endpoint_cards = "".join(
                 f'<div class="endpoint-card">'
                 f'<div class="endpoint-name">{html.escape(ep.name)}'
-                f'<span class="endpoint-badge">{ep.provider}</span>'
+                f'<span class="endpoint-badge">{html.escape(ep.provider)}</span>'
                 + (
                     '<span class="endpoint-badge" style="color:#dc2626;background:#dc262611;border-color:#dc262644">missing key</span>'
                     if not ep.api_key else ""
