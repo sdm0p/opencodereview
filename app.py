@@ -432,10 +432,15 @@ _ragas_lock = threading.Lock()
 def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
     """Extract the inputs RAGAS needs from the finished graph state."""
     context_chunks = state.values.get("context_chunks", [])
-    if not context_chunks:
-        return None
     query = state.values.get("diff", "") or ""
     contexts = [c.content for c in context_chunks if c.content]
+    # When vector retrieval is disabled on a small host, evaluate against the
+    # PR diff itself. This preserves a grounded context for RAGAS instead of
+    # silently dropping quality measurement altogether.
+    if not contexts and query:
+        contexts = [query]
+    if not contexts:
+        return None
 
     # Build answer text from findings + verdict for
     # faithfulness & answer_relevancy metrics
