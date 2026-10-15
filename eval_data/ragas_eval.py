@@ -67,7 +67,7 @@ def _check_ragas() -> bool:
 # limits so scoring completes instead of tripping 429s — which previously
 # caused long retry backoffs and 0.0000 scores. Override with the
 # OCR_RAGAS_INTERVAL env var (float seconds, 0 disables).
-_RAGAS_INTERVAL = float(os.environ.get("OCR_RAGAS_INTERVAL", "3.0") or 3.0)
+_RAGAS_INTERVAL = float(os.environ.get("OCR_RAGAS_INTERVAL", "0.5") or 0.5)
 _ragas_throttle_lock = threading.Lock()
 
 
@@ -472,7 +472,7 @@ def _compute_mmr(
     # Score up to the first 5 chunks for relevance using the LLM.
     # Top-5 MMR is standard — rank 5 yields 1/5 = 0.20, and
     # anything beyond rank 5 barely changes the score anyway.
-    MAX_MMR_RANK = 5
+    MAX_MMR_RANK = 2
     top_chunks = retrieved_contexts[:MAX_MMR_RANK]
 
     judged = 0
