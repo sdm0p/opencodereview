@@ -101,6 +101,11 @@ USER root
 RUN pip install --no-cache-dir sentence-transformers
 # Note: No USER appuser here — ENTRYPOINT (inherited from runtime) handles privilege dropping
 
+# Keep the lightweight runtime as Docker's default final stage. The full image
+# remains available explicitly with `--target runtime-full` for local retrieval
+# rebuilds that need sentence-transformers.
+FROM runtime AS final
+
 # Note: sentence-transformers pulls in PyTorch (~800 MB), making the image
 # significantly larger. Only use this target when you need the retrieval node
 # to build vector indexes from scratch.
