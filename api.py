@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from app import DB_PATH, _build_and_stream, _normalize_endpoint_name
+from app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _ragas_tasks, _ragas_lock
 from graph import build_graph
 from observability import TokenCostCallback, flush_langfuse, get_langfuse_handler
 from state import Finding, Verdict
@@ -52,17 +52,31 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     result = {key: value for key, value in job.items() if key not in {"config", "future"}}
     return result
 
+def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
+    result = _public_job(job)
+    task_id = result.get("ragas_task_id")
+    if task_id:
+        with _ragas_lock:
+            task = _ragas_tasks.get(task_id)
+        if not task or not task.get("done"):
+            result["ragas"] = {"status": "pending"}
+        elif task.get("error"):
+            result["ragas"] = {"status": "failed", "error": task.get("error")}
+        else:
+            result["ragas"] = {"status": "completed", "scores": task.get("scores")}
+    return result
+
 
 def _run_job(job_id: str, request: ReviewRequest) -> None:
     with _lock:
         if job_id in _jobs:
             _jobs[job_id]["status"] = "processing"
     try:
-        state, config, cost, _ = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
+        state, config, cost, ragas = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
         verdict: Verdict | None = state.values.get("verdict")
         findings: list[Finding] = state.values.get("final_findings", [])
         with _lock:
-            _jobs[job_id].update(status="awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost)
+            _jobs[job_id].update(status="awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None)
     except Exception as exc:
         with _lock:
             _jobs[job_id].update(status="failed", error=str(exc)[:500])
@@ -81,7 +95,7 @@ def create_review(request: ReviewRequest, x_api_key: str | None = Header(default
     with _lock:
         _jobs[job_id] = job
     job["future"] = _executor.submit(_run_job, job_id, request)
-    return _public_job(job)
+    return _with_ragas(job)
 
 
 @app.get("/api/reviews/{job_id}")
@@ -91,7 +105,7 @@ def get_review(job_id: str, x_api_key: str | None = Header(default=None)) -> dic
         job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Review not found")
-    return _public_job(job)
+    return _with_ragas(job)
 
 
 @app.post("/api/reviews/{job_id}/decision")
