@@ -85,7 +85,14 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
     if task_id:
         with _ragas_lock:
             task = _ragas_tasks.get(task_id)
-        if not task or not task.get("done"):
+        if not task:
+            # Task registries are process-local. A restart invalidates an
+            # in-flight task instead of making the client poll forever.
+            if result.get("ragas_scores"):
+                result["ragas"] = {"status": "completed", "scores": result["ragas_scores"]}
+            else:
+                result["ragas"] = {"status": "unavailable", "error": "RAGAS task was lost during process restart"}
+        elif not task.get("done"):
             result["ragas"] = {"status": "pending"}
         elif task.get("error"):
             result["ragas"] = {"status": "failed", "error": task.get("error")}
@@ -93,6 +100,13 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
             scores = task.get("scores") or {}
             if scores:
                 result["ragas"] = {"status": "completed", "scores": scores}
+                if not job.get("ragas_scores"):
+                    with _lock:
+                        live = _jobs.get(job.get("id"))
+                        if live is not None:
+                            live["ragas_scores"] = scores
+                            live["ragas_status"] = "completed"
+                            _save_job(live)
             else:
                 result["ragas"] = {"status": "completed_no_scores", "scores": {}, "error": "RAGAS completed without metric values"}
     return result
