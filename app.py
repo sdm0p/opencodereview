@@ -62,7 +62,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DB_PATH = "checkpoints.db"
+# Set this to a mounted volume or durable filesystem path in hosted
+# deployments. The default keeps local development self-contained.
+DB_PATH = os.environ.get("OPENCODEREVIEW_DB_PATH", "checkpoints.db")
 
 SEVERITY_COLORS = {
     "critical": "#dc2626",
