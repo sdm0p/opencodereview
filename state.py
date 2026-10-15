@@ -87,3 +87,4 @@ class OpenCodeReviewState(BaseModel):
 
     # Human-in-the-loop: set by the human_approval node
     human_approved: bool = False
+    posting_result: Optional[dict] = None

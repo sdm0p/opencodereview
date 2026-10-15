@@ -114,9 +114,11 @@ def decide_review(job_id: str, request: DecisionRequest, x_api_key: str | None =
             callbacks.append(handler)
         config = dict(config)
         config["callbacks"] = callbacks
-        graph.invoke(Command(resume={"action": "approve"}), config)
+        result = graph.invoke(Command(resume={"action": "approve"}), config)
+        posting_result = result.get("posting_result") if isinstance(result, dict) else None
+        final_status = (posting_result or {}).get("status", "posted")
         with _lock:
-            job.update(status="posted", decision="approve")
+            job.update(status=final_status, decision="approve", posting_result=posting_result)
         return _public_job(job)
     except Exception as exc:
         with _lock:
