@@ -197,7 +197,7 @@ def health() -> dict[str, Any]:
 def create_review(request: ReviewRequest, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     _authorize(x_api_key)
     job_id = str(uuid.uuid4())
-    job = {"id": job_id, "repo": request.repo, "pr_number": request.pr_number, "status": "queued", "created_at": datetime.now(timezone.utc).isoformat()}
+    job = {"id": job_id, "repo": request.repo, "pr_number": request.pr_number, "endpoint": request.endpoint, "status": "queued", "created_at": datetime.now(timezone.utc).isoformat()}
     with _lock:
         _jobs[job_id] = job
         _save_job(job)
