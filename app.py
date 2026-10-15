@@ -78,6 +78,11 @@ RECOMMENDATION_ICONS = {
     "comment": "💬",
 }
 
+# Default dropdown choice shown in the UI.  Gradio 6's Dropdown has no
+# placeholder support, so a real choice is displayed and mapped back to
+# the "" (auto) sentinel wherever the value enters the pipeline.
+AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq fallback)"
+
 
 # ─── Orchestration ───────────────────────────────────────────────────────────
 
@@ -769,6 +774,11 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
         yield [None, None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
         return
 
+    # The UI may pass the display default; map it to the "" auto sentinel
+    # before any endpoint lookup (get_endpoint would raise on the label).
+    if endpoint_name == AUTO_ENDPOINT_CHOICE:
+        endpoint_name = ""
+
     # Fail fast on an unknown endpoint name (allow_custom_value lets any
     # string through the dropdown; the reviewer nodes would otherwise
     # swallow the ValueError and report a confusing empty review).
@@ -1040,6 +1050,18 @@ body.dark {
     border-color: var(--glass-edge) !important;
     backdrop-filter: blur(8px);
 }
+/* Dropdowns are not native <select>: the visible box is the theme's
+   div.wrap (opaque --input-background-fill) holding a borderless input.
+   Painting only input/textarea/select filled just the inner input and
+   left the wrap dark — the "lighter rectangle inside a darker box" bug.
+   Tag dropdowns with the "glass-dropdown" elem class and paint their
+   wrap so they read as one uniform glass field, visually identical to
+   the Repository / PR # textboxes. */
+.gradio-container .glass-dropdown .wrap {
+    background-color: var(--glass-field) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
 body.dark .gradio-container {
     background: var(--bg-page) !important;
 }
@@ -1058,6 +1080,13 @@ body.dark .tab-nav {
     background: transparent !important;
 }
 body.dark input, body.dark textarea, body.dark select {
+    background-color: var(--glass-field) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+/* Same wrap-fill fix for dark mode (see light-mode rule above). */
+body.dark .gradio-container .glass-dropdown .wrap {
     background-color: var(--glass-field) !important;
     color: var(--text-primary) !important;
     border-color: var(--glass-edge) !important;
@@ -1296,12 +1325,14 @@ with gr.Blocks(title="OpenCodeReview") as demo:
 
         with gr.Row():
             endpoint_input = gr.Dropdown(
-                choices=dropdown_choices(),
-                value="",
+                # The "" sentinel stays first in the choices so the
+                # AUTO_ENDPOINT_CHOICE default is always a valid member.
+                choices=[""] + dropdown_choices(),
+                value=AUTO_ENDPOINT_CHOICE,
                 label="LLM Endpoint",
                 info=(
                     "Built-ins: Gemini and Groq (Groq serves Llama models). "
-                    "Empty = auto (Gemini → Groq fallback)."
+                    f"Default '{AUTO_ENDPOINT_CHOICE}' = Gemini → Groq fallback."
                 ),
                 # Grouped optgroup choices make Gradio's strict membership
                 # check reject values that sit inside a group (e.g. a custom
@@ -1310,12 +1341,16 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 # still fail with a clear error at review time.
                 allow_custom_value=True,
                 scale=3,
+                elem_classes=["glass-dropdown"],
             )
             test_selected_btn = gr.Button("Test selected", size="sm", scale=1)
         endpoint_test_msg = gr.Markdown()
 
         def on_test_selected(endpoint_name):
             """Probe the currently selected endpoint (built-in or custom)."""
+            # Map the display default back to the "" (auto) sentinel.
+            if endpoint_name == AUTO_ENDPOINT_CHOICE:
+                endpoint_name = ""
             if not endpoint_name:
                 return (
                     "ℹ️ Leave the endpoint empty for auto (Gemini → Groq fallback), "
@@ -1356,6 +1391,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                     label="Type",
                     info="openai = any OpenAI-compatible API (DeepSeek, OpenRouter, Ollama…)",
                     scale=1,
+                    elem_classes=["glass-dropdown"],
                 )
             with gr.Row():
                 ep_base_url_input = gr.Textbox(
@@ -1407,6 +1443,12 @@ with gr.Blocks(title="OpenCodeReview") as demo:
         # ── Event wiring ──────────────────────────────────────────────
         def on_run_click(*args):
             """Generator that clears old state, runs review, shows results."""
+            # Map the dropdown's display default back to the "" (auto)
+            # sentinel expected by the pipeline (endpoint == "" → built-in
+            # with Gemini → Groq fallback).
+            args = tuple(
+                "" if a == AUTO_ENDPOINT_CHOICE else a for a in args
+            )
             # Yield initial loading state — must match the 12 outputs of
             # run_btn.click in order (loading_box, cancel_btn, run_btn,
             # status_msg, 5 result displays, pr_state, results_panel,
@@ -1562,7 +1604,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             """Remove all UI-added endpoints and reset the dropdown."""
             clear_session_endpoints()
             return (
-                gr.update(choices=dropdown_choices(), value=""),
+                gr.update(choices=[""] + dropdown_choices(), value=AUTO_ENDPOINT_CHOICE),
                 "🗑 Cleared — dropdown reset to the built-in default.",
                 _format_session_endpoints(),
             )
