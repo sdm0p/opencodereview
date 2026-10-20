@@ -144,6 +144,13 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
             "reason": "No retrieval context was available for RAGAS evaluation",
         }
     else:
+        if job.get("ragas_status") in {"failed", "unavailable", "completed_no_scores"}:
+            result["ragas"] = {
+                "status": job["ragas_status"],
+                "scores": job.get("ragas_scores") or {},
+                "error": job.get("ragas_error"),
+            }
+            return result
         with _ragas_lock:
             task = _ragas_tasks.get(task_id)
         if not task:
@@ -153,15 +160,33 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
                 result["ragas"] = {"status": "completed", "scores": result["ragas_scores"]}
             else:
                 result["ragas"] = {"status": "unavailable", "error": "RAGAS task was lost during process restart"}
+                with _lock:
+                    live = _jobs.get(job.get("id"))
+                    if live is not None:
+                        live["ragas_status"] = "unavailable"
+                        live["ragas_error"] = result["ragas"]["error"]
+                        _save_job(live)
         elif not task.get("done"):
             timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
             started = float(task.get("started", 0) or 0)
             if started and datetime.now(timezone.utc).timestamp() - started > timeout:
                 result["ragas"] = {"status": "failed", "error": f"RAGAS exceeded {int(timeout)} second timeout"}
+                with _lock:
+                    live = _jobs.get(job.get("id"))
+                    if live is not None:
+                        live["ragas_status"] = "failed"
+                        live["ragas_error"] = result["ragas"]["error"]
+                        _save_job(live)
             else:
                 result["ragas"] = {"status": "pending"}
         elif task.get("error"):
             result["ragas"] = {"status": "failed", "error": task.get("error")}
+            with _lock:
+                live = _jobs.get(job.get("id"))
+                if live is not None:
+                    live["ragas_status"] = "failed"
+                    live["ragas_error"] = task.get("error")
+                    _save_job(live)
         else:
             scores = task.get("scores") or {}
             if scores:
@@ -175,6 +200,12 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
                             _save_job(live)
             else:
                 result["ragas"] = {"status": "completed_no_scores", "scores": {}, "error": "RAGAS completed without metric values"}
+                with _lock:
+                    live = _jobs.get(job.get("id"))
+                    if live is not None:
+                        live["ragas_status"] = "completed_no_scores"
+                        live["ragas_error"] = result["ragas"]["error"]
+                        _save_job(live)
     return result
 
 
@@ -204,7 +235,7 @@ def _hydrate_jobs() -> None:
             continue
         status = persisted.get("status")
         _jobs[job_id] = persisted
-        if persisted.get("ragas_inputs") and persisted.get("ragas_task_id") and not persisted.get("ragas_scores"):
+        if persisted.get("ragas_inputs") and persisted.get("ragas_task_id") and not persisted.get("ragas_scores") and not persisted.get("ragas_status"):
             new_task = _spawn_ragas_background(
                 persisted["ragas_inputs"],
                 persisted.get("repo", ""),
