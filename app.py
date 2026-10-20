@@ -433,6 +433,10 @@ def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
     """Extract the inputs RAGAS needs from the finished graph state."""
     context_chunks = state.values.get("context_chunks", [])
     query = state.values.get("diff", "") or ""
+    if not query:
+        changed = state.values.get("changed_files", [])
+        paths = [getattr(item, "path", "") for item in changed if getattr(item, "path", "")]
+        query = "Review changed files: " + ", ".join(paths) if paths else "Review the pull request changes"
     contexts = [c.content for c in context_chunks if c.content]
     # When vector retrieval is disabled on a small host, evaluate against the
     # PR diff itself. This preserves a grounded context for RAGAS instead of
