@@ -11,6 +11,11 @@
 - GitHub posting receipts distinguish inline, fallback, finding, and verdict failures.
 - React production build and Vercel deployment succeed.
 - A reproducible diff-backed benchmark fixture exists for five public PRs.
+- Live validation on `calcom/cal.com#8087` detected all four unawaited
+  `forEach(async ...)` defects and returned `request_changes` with four high
+  findings (score 2/10).
+- Deterministic correctness checks survive remote-provider failures, and model
+  prompts now bound diff and changed-file context to free-provider limits.
 
 ## Required before production release
 
