@@ -12,11 +12,13 @@ import secrets
 import sqlite3
 import threading
 import uuid
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.types import Command
 from pydantic import BaseModel, Field
@@ -29,13 +31,15 @@ from endpoints import register_endpoint, unregister_endpoint
 
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=False)
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=True)
 
 _jobs: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("OCR_MAX_WORKERS", "2")))
 _rate_lock = threading.Lock()
 _rate_windows: dict[str, list[float]] = {}
+_oauth_states: set[str] = set()
+_sessions: dict[str, dict[str, Any]] = {}
 
 def _rate_limit(request: Request) -> None:
     limit = int(os.getenv("OCR_RATE_LIMIT_PER_MINUTE", "0") or 0)
@@ -151,6 +155,63 @@ def _authorize(token: str | None) -> None:
         raise HTTPException(status_code=503, detail="API authentication is not configured")
     if expected and (not token or not secrets.compare_digest(token, expected)):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+def _authorize_request(token: str | None, request: Request) -> None:
+    if _session(request):
+        return
+    _authorize(token)
+
+def _session(request: Request) -> dict[str, Any] | None:
+    sid = request.cookies.get("ocr_session")
+    return _sessions.get(sid) if sid else None
+
+@app.get("/api/auth/github/start")
+def github_login() -> RedirectResponse:
+    client_id = os.getenv("GITHUB_OAUTH_CLIENT_ID", "").strip()
+    if not client_id:
+        raise HTTPException(status_code=503, detail="GitHub OAuth is not configured")
+    state = secrets.token_urlsafe(32)
+    _oauth_states.add(state)
+    callback = os.getenv("GITHUB_OAUTH_CALLBACK_URL", "").strip() or "http://localhost:8000/api/auth/github/callback"
+    url = "https://github.com/login/oauth/authorize?" + requests.compat.urlencode({"client_id": client_id, "redirect_uri": callback, "scope": "read:user user:email repo", "state": state})
+    return RedirectResponse(url)
+
+@app.get("/api/auth/github/callback")
+def github_callback(code: str, state: str, response: Request) -> RedirectResponse:
+    if state not in _oauth_states:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    _oauth_states.discard(state)
+    client_id = os.getenv("GITHUB_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.getenv("GITHUB_OAUTH_CLIENT_SECRET", "").strip()
+    callback = os.getenv("GITHUB_OAUTH_CALLBACK_URL", "").strip() or "http://localhost:8000/api/auth/github/callback"
+    token_resp = requests.post("https://github.com/login/oauth/access_token", data={"client_id": client_id, "client_secret": client_secret, "code": code, "redirect_uri": callback}, headers={"Accept": "application/json"}, timeout=20)
+    token_resp.raise_for_status()
+    access_token = token_resp.json().get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=502, detail="GitHub did not return an access token")
+    user_resp = requests.get("https://api.github.com/user", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}, timeout=20)
+    user_resp.raise_for_status()
+    user = user_resp.json()
+    sid = secrets.token_urlsafe(32)
+    _sessions[sid] = {"token": access_token, "github_id": user.get("id"), "login": user.get("login")}
+    frontend = os.getenv("OCR_FRONTEND_URL", allowed_origins[0] if allowed_origins else "http://localhost:5173")
+    out = RedirectResponse(frontend)
+    out.set_cookie("ocr_session", sid, httponly=True, secure=frontend.startswith("https://"), samesite="lax", max_age=86400)
+    return out
+
+@app.get("/api/auth/me")
+def github_me(request: Request) -> dict[str, Any]:
+    session = _session(request)
+    if not session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"github_id": session["github_id"], "login": session["login"]}
+
+@app.post("/api/auth/logout")
+def github_logout(request: Request) -> dict[str, str]:
+    sid = request.cookies.get("ocr_session")
+    if sid:
+        _sessions.pop(sid, None)
+    return {"status": "logged_out"}
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -346,7 +407,7 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/reviews", status_code=202)
 def create_review(request: ReviewRequest, http_request: Request, x_api_key: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict[str, Any]:
-    _authorize(x_api_key)
+    _authorize_request(x_api_key, http_request)
     _rate_limit(http_request)
     if idempotency_key:
         with _lock:
@@ -363,8 +424,9 @@ def create_review(request: ReviewRequest, http_request: Request, x_api_key: str 
 
 
 @app.get("/api/reviews/{job_id}")
-def get_review(job_id: str, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
-    _authorize(x_api_key)
+def get_review(job_id: str, request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    # API-key authorization remains supported for polling; OAuth callers use the cookie path.
+    _authorize_request(x_api_key, request)
     with _lock:
         job = _jobs.get(job_id)
         if not job:
@@ -376,7 +438,7 @@ def get_review(job_id: str, x_api_key: str | None = Header(default=None)) -> dic
 
 @app.post("/api/reviews/{job_id}/decision")
 def decide_review(job_id: str, request: DecisionRequest, http_request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
-    _authorize(x_api_key)
+    _authorize_request(x_api_key, http_request)
     _rate_limit(http_request)
     with _lock:
         job = _jobs.get(job_id)
