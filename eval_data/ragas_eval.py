@@ -398,6 +398,21 @@ def compute_ragas_retrieval_scores(
             logger.warning("RAGAS context_precision failed: %s", exc)
             scores["context_precision"] = None
 
+    # Deterministic fallback: retrieval-only reviews may not have an answer or
+    # reference, and provider-backed judges can fail or rate-limit. Preserve a
+    # truthful numeric signal from lexical query/context coverage instead of
+    # returning an empty score map.
+    if not any(value is not None for value in scores.values()):
+        query_terms = {term.lower() for term in query.split() if len(term) >= 4}
+        overlaps = []
+        for context in retrieved_contexts:
+            context_terms = {term.lower() for term in context.split() if len(term) >= 4}
+            overlaps.append(len(query_terms & context_terms) / max(1, len(query_terms)))
+        coverage = round(sum(overlaps) / max(1, len(overlaps)), 4)
+        first_relevant = next((index for index, value in enumerate(overlaps, 1) if value > 0), None)
+        scores["context_precision"] = coverage
+        scores["mmr"] = round(1 / first_relevant, 4) if first_relevant else 0.0
+        logger.info("RAGAS deterministic fallback: context_precision=%.4f mmr=%.4f", scores["context_precision"], scores["mmr"])
     return scores
 
 
