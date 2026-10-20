@@ -25,6 +25,7 @@ from app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _ragas_tas
 from graph import build_graph
 from observability import TokenCostCallback, flush_langfuse, get_langfuse_handler
 from state import Finding, Verdict
+from endpoints import register_endpoint, unregister_endpoint
 
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
@@ -130,6 +131,10 @@ class ReviewRequest(BaseModel):
     repo: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
     pr_number: int = Field(gt=0)
     endpoint: str | None = None
+    provider: str | None = Field(default=None, pattern=r"^(openai|anthropic|google)$")
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
 
 
 class DecisionRequest(BaseModel):
@@ -233,6 +238,14 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             _jobs[job_id]["status"] = "processing"
             _save_job(_jobs[job_id])
     try:
+        ephemeral_endpoint = None
+        endpoint_name = _normalize_endpoint_name(request.endpoint)
+        if request.api_key:
+            if not request.provider or not request.model:
+                raise ValueError("provider and model are required when supplying a user API key")
+            ephemeral_endpoint = f"user-{job_id}"
+            register_endpoint(ephemeral_endpoint, request.provider, request.api_key, request.base_url, request.model)
+            endpoint_name = ephemeral_endpoint
         def save_ragas(scores: dict, error: str | None) -> None:
             with _lock:
                 live = _jobs.get(job_id)
@@ -246,7 +259,7 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
         state, config, cost, ragas, ragas_inputs = _build_and_stream(
             request.repo,
             request.pr_number,
-            _normalize_endpoint_name(request.endpoint),
+            endpoint_name,
             ragas_background=True,
             ragas_result_callback=save_ragas,
         )
@@ -259,6 +272,9 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
         with _lock:
             _jobs[job_id].update(status="failed", error=str(exc)[:500])
             _save_job(_jobs[job_id])
+    finally:
+        if 'ephemeral_endpoint' in locals() and ephemeral_endpoint:
+            unregister_endpoint(ephemeral_endpoint)
 
 
 def _hydrate_jobs() -> None:

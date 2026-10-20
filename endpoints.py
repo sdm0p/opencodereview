@@ -157,6 +157,11 @@ def clear_session_endpoints() -> None:
     with _session_lock:
         _session_endpoints.clear()
 
+def unregister_endpoint(name: str) -> None:
+    """Remove one ephemeral user endpoint and its API key from memory."""
+    with _session_lock:
+        _session_endpoints.pop(name, None)
+
 
 def session_endpoints() -> list[EndpointConfig]:
     """Endpoints added at runtime via the UI (env-var ones excluded)."""
