@@ -232,11 +232,21 @@ def health() -> dict[str, Any]:
         for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
     )
     require_auth = os.getenv("OCR_REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
+    persistence = "local_default_path"
+    if os.getenv("SUPABASE_DB_URL"):
+        probe = _postgres_connect()
+        if probe is not None:
+            probe.close()
+            persistence = "supabase_postgres"
+        else:
+            persistence = "supabase_configured_unreachable"
+    elif os.getenv("OPENCODEREVIEW_DB_PATH"):
+        persistence = "configured_path"
     return {
         "status": "ok",
         "inference": "remote_provider_configured" if provider_configured else "fallback_or_unconfigured",
         "authentication": "required" if require_auth else "optional",
-        "persistence": "supabase_postgres" if os.getenv("SUPABASE_DB_URL") else ("configured_path" if os.getenv("OPENCODEREVIEW_DB_PATH") else "local_default_path"),
+        "persistence": persistence,
         "local_embeddings": False,
     }
 
