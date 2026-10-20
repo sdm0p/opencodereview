@@ -11,9 +11,12 @@ function Verdict({ job }) {
   if (!job?.verdict) return null;
   const v = job.verdict;
   const blocking = ["block", "request_changes"].includes(v.recommendation);
+  const score = typeof v.overall_score === "number" ? v.overall_score : null;
+  const scoreLabel = score == null ? "Not scored" : score < 4 ? "High risk" : score < 7 ? "Review carefully" : "Low risk";
+  const scoreHelp = score == null ? "The review did not return a numeric score." : score < 4 ? "Resolve the high-severity findings before merging." : score < 7 ? "Read the findings and confirm the risk before merging." : "No major risks were detected by the review.";
   return <section className={`result-card verdict ${blocking ? "blocking" : "approved"}`} aria-labelledby="verdict-title">
-    <div className="result-title"><div><span className="panel-kicker">Final verdict</span><h3 id="verdict-title">{pretty(v.recommendation).toUpperCase()}</h3></div><strong className="score">{typeof v.overall_score === "number" ? `${v.overall_score.toFixed(1)}/10` : "—"}</strong></div>
-    <p>{v.summary || "No summary was returned."}</p><div className="metrics"><span>{job.findings?.length || 0} findings</span>{job.cost && <span>Cost {typeof job.cost === "string" ? job.cost : JSON.stringify(job.cost)}</span>}</div>
+    <div className="result-title"><div><span className="panel-kicker">Review decision</span><h3 id="verdict-title">{pretty(v.recommendation).toUpperCase()}</h3></div><div className="score-block"><strong className="score">{score == null ? "—" : `${score.toFixed(1)}/10`}</strong><span>{scoreLabel}</span></div></div>
+    <p className="verdict-summary">{v.summary || "The review is ready for your decision."}</p><div className="score-explanation"><strong>What this means</strong><span>{scoreHelp}</span></div><div className="metrics"><span>{job.findings?.length || 0} findings</span>{job.cost && <span>Cost {typeof job.cost === "string" ? job.cost : JSON.stringify(job.cost)}</span>}</div>
   </section>;
 }
 
