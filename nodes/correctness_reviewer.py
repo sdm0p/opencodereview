@@ -21,12 +21,12 @@ PROMPT_VERSION = "v1"
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"correctness_{PROMPT_VERSION}.txt"
 
 # Max characters of context to include in the prompt (soft limit)
-MAX_CONTEXT_CHARS = 6_000
+MAX_CONTEXT_CHARS = 2_000
 # Max changed-file content to include per file
-MAX_FILE_CONTENT_CHARS = 1_200
+MAX_FILE_CONTENT_CHARS = 600
 # Keep model requests below free-provider token limits. Deterministic checks
 # still inspect the complete diff from state.diff.
-MAX_DIFF_CHARS = 14_000
+MAX_DIFF_CHARS = 9_000
 
 
 # ─── Load prompt from file ──────────────────────────────────────────────────
