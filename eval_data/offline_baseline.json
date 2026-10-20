@@ -1,0 +1,829 @@
+{
+  "rows": 136,
+  "gold_findings": 136,
+  "pred_findings": 0,
+  "matched": 0,
+  "false_positives": 0,
+  "missed": 136,
+  "precision": 0.0,
+  "recall": 0.0,
+  "f1": 0.0,
+  "failures": [
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/8087#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/8087#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10600#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10600#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10600#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10600#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10967#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10967#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10967#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10967#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/10967#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/22345#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/22345#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/7232#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/7232#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/8330#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/8330#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/11059#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/11059#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/11059#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/11059#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/11059#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14943#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14943#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14740#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14740#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14740#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14740#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/14740#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/22532#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/calcom/cal.com/pull/22532#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/2#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/2#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/3#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/3#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4#5",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/5#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/5#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/6#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/9#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/9#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/79265#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/79265#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/79265#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/79265#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/79265#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/103633#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/103633#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/76186#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/76186#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/107534#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/106778#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/106778#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/90045#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/90045#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/90045#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/80329#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/90939#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/90939#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/94942#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/94942#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/97529#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/grafana/grafana/pull/97529#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/keycloak-greptile/pull/1#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/keycloak-greptile/pull/1#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/32918#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/32918#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/33832#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/33832#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/36882#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/36880#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/36880#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/36880#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37038#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37038#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37429#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37429#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37429#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37429#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37634#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37634#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37634#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/37634#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/38446#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/38446#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/40940#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/keycloak/keycloak/pull/40940#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/67876#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/67876#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/67876#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/93824#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/93824#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/93824#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/93824#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/93824#4",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/77754#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/77754#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/77754#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/77754#3",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/80528#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/80528#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/95633#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/95633#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/95633#2",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/80168#0",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    },
+    {
+      "task_id": "https://github.com/getsentry/sentry/pull/80168#1",
+      "gold": 1,
+      "predicted": 0,
+      "matched": 0
+    }
+  ]
+}
