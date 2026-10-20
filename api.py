@@ -247,7 +247,8 @@ def health() -> dict[str, Any]:
         "inference": "remote_provider_configured" if provider_configured else "fallback_or_unconfigured",
         "authentication": "required" if require_auth else "optional",
         "persistence": persistence,
-        "local_embeddings": False,
+        "local_embeddings": os.getenv("OPENCODEREVIEW_ALLOW_LOCAL_EMBEDDINGS", "false").lower()
+        in {"1", "true", "yes", "on"},
     }
 
 

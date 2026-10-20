@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import gradio as gr
 from langgraph.types import Command
@@ -517,8 +518,32 @@ def _ragas_worker(
     handler,
 ) -> None:
     """Daemon thread body: compute scores, stash them for the Timer poll."""
+    timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
     try:
-        scores = _compute_and_log_ragas(inputs, repo, pr_number, run_trace_id, handler)
+        # The provider call may block on a network timeout. Keep the task
+        # terminal and observable even when the provider does not return.
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ragas-call")
+        future = pool.submit(
+            _compute_and_log_ragas,
+            inputs,
+            repo,
+            pr_number,
+            run_trace_id,
+            handler,
+        )
+        try:
+            scores = future.result(timeout=timeout)
+        except FutureTimeoutError:
+            scores = {}
+            with _ragas_lock:
+                entry = _ragas_tasks.get(task_id)
+                if entry is not None:
+                    entry["error"] = f"RAGAS exceeded {int(timeout)} second timeout"
+                    entry["done"] = True
+            pool.shutdown(wait=False, cancel_futures=True)
+            return
+        else:
+            pool.shutdown(wait=True)
     except Exception as exc:
         logger.warning("RAGAS worker failed: %s", exc)
         with _ragas_lock:
