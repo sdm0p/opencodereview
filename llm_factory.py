@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Verified via Google AI documentation: gemini-3.1-flash-lite is the correct name.
 # The base 'gemini-3.1-flash' does not exist in the API.
 GEMINI_MODEL = "gemini-3.1-flash-lite"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 DEFAULT_TEMPERATURE = 0.0
 
 
