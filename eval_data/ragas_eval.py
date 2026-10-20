@@ -180,7 +180,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
         configured_model = os.getenv("RAGAS_MODEL", "").strip()
         if configured_model.startswith("groq/"):
             configured_model = configured_model.split("/", 1)[1]
-        groq_kwargs = {"temperature": 0, "max_retries": 1}
+        groq_kwargs = {"temperature": 0, "max_retries": 1, "timeout": 20}
         if configured_model:
             groq_kwargs["model"] = configured_model
         llm = _get_groq_chat(**groq_kwargs)
@@ -188,7 +188,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             logger.info(
                 "RAGAS evaluator: GROQ_API_KEY not set — falling back to Gemini"
             )
-            llm = _get_gemini_chat(temperature=0, max_retries=1)
+            llm = _get_gemini_chat(temperature=0, max_retries=1, timeout=20)
         if llm is None:
             raise ValueError(
                 "No LLM available for RAGAS scoring. "
