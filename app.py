@@ -444,6 +444,9 @@ _ragas_lock = threading.Lock()
 
 def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
     """Extract the inputs RAGAS needs from the finished graph state."""
+    verdict = state.values.get("verdict")
+    if verdict and verdict.recommendation == "incomplete":
+        return None
     context_chunks = state.values.get("context_chunks", [])
     query = state.values.get("diff", "") or ""
     if not query:

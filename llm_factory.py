@@ -122,6 +122,14 @@ def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
     kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
     provider = endpoint.provider
     model = endpoint.model
+    # MiniMax M3.1 requires reasoning and OpenRouter defaults to max effort.
+    # Reserve room for reasoning + visible JSON rather than truncating at 1200.
+    if 'minimax-m3.1' in model.lower():
+        kwargs['max_tokens'] = max(int(kwargs.get('max_tokens') or 0), 8192)
+        if endpoint.base_url and 'openrouter.ai' in endpoint.base_url:
+            extra = dict(kwargs.get('extra_body') or {})
+            extra['reasoning'] = {'effort': 'low'}
+            kwargs['extra_body'] = extra
     temperature = kwargs.pop("temperature", DEFAULT_TEMPERATURE)
 
     if provider == "anthropic":

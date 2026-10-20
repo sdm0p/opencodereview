@@ -129,33 +129,9 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
         logger.info("No diff to review — skipping correctness review")
         return {}
 
-    # Run deterministic checks before the model call so provider failures do
-    # not erase high-confidence findings.
+    # A regex match cannot establish whether async side effects must be awaited.
+    # Retain findings only when the reviewer has evaluated the surrounding code.
     static_findings = []
-    current_file = "unknown"
-    current_line = 0
-    for raw_line in (state.diff or "").splitlines():
-        if raw_line.startswith("+++ b/"):
-            current_file = raw_line[6:].strip()
-            current_line = 0
-        elif raw_line.startswith("@@"):
-            match = re.search(r"\+(\d+)", raw_line)
-            current_line = int(match.group(1)) if match else current_line
-        elif re.search(r"\.forEach\s*\(\s*async\b", raw_line):
-            static_findings.append(Finding(
-                file_path=current_file,
-                line_start=max(1, current_line),
-                line_end=max(1, current_line),
-                severity=Severity.HIGH,
-                category="correctness",
-                comment="An async callback passed to forEach is not awaited, so cleanup or side effects can run after the function returns and errors can bypass surrounding try/catch handling.",
-                confidence=0.99,
-                suggested_fix="Replace forEach(async ...) with a for...of loop or await Promise.all(items.map(async ...)).",
-            ))
-        if raw_line.startswith("+") and not raw_line.startswith("+++"):
-            current_line += 1
-
-    logger.info("Deterministic correctness checks found %d issue(s)", len(static_findings))
 
     # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
     try:

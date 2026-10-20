@@ -11,6 +11,8 @@ from nodes.security_reviewer import security_reviewer_node
 from state import OpenCodeReviewState
 from state import ChangedFile
 from nodes.test_coverage_reviewer import test_coverage_reviewer_node as coverage_node
+from nodes.correctness_reviewer import correctness_reviewer_node
+from types import SimpleNamespace
 
 
 class Review(BaseModel):
@@ -35,6 +37,36 @@ def test_fast_documentation_routes_without_test_specialist():
     state = OpenCodeReviewState(diff='+documentation', review_mode='fast', changed_files=[
         ChangedFile(path='README.md', status='modified', content='documentation', diff_hunk='+documentation')])
     assert coverage_node(state)['review_stages'][0]['status'] == 'skipped'
+
+
+def test_length_error_gets_one_larger_budget_retry():
+    class LengthFinishReasonError(Exception):
+        pass
+    model = model_with_results(LengthFinishReasonError())
+    model.max_tokens = 8192
+    structured = model.with_structured_output.return_value
+    structured.bind.return_value.invoke.return_value = {'findings': []}
+    assert invoke_review(model, Review, []).findings == []
+    structured.bind.assert_called_once_with(max_tokens=16384)
+
+
+def test_minimax_has_room_for_reasoning_and_json(monkeypatch):
+    import sys
+    constructor = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setitem(sys.modules, 'langchain_openai', SimpleNamespace(ChatOpenAI=constructor))
+    from llm_factory import create_endpoint_llm
+    model = create_endpoint_llm(SimpleNamespace(name='test', provider='openai',
+        model='minimax/minimax-m3.1-flash:free', api_key='fake-key',
+        base_url='https://openrouter.ai/api/v1'), max_tokens=1200)
+    assert model.max_tokens == 8192
+    assert model.extra_body['reasoning']['effort'] == 'low'
+
+
+def test_async_foreach_match_is_not_a_confirmed_finding_when_model_fails(monkeypatch):
+    monkeypatch.setattr('nodes.correctness_reviewer.create_llm', Mock(side_effect=ValueError('unavailable')))
+    result = correctness_reviewer_node(OpenCodeReviewState(diff='+++ b/test.ts\n@@ -1 +1 @@\n+items.forEach(async (x) => { await save(x); });'))
+    assert result['findings'] == []
+    assert result['review_stages'][0]['status'] == 'failed'
 
 
 def model_with_results(*results):

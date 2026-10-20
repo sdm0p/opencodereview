@@ -66,6 +66,13 @@ def invoke_review(llm, schema, messages, mode="thorough"):
             except ValidationError as exc:
                 result = exc
         # No retries for auth, rate limits, transport errors or timeouts.
+        if not attempt and type(result).__name__ == 'LengthFinishReasonError':
+            # Override the underlying model call on the structured runnable.
+            # This shares the original deadline and the single repair allowance.
+            current_limit = getattr(llm, 'max_tokens', None) or 2000
+            structured = structured.bind(max_tokens=min(max(int(current_limit) * 2, 8192), 16384))
+            messages.append({'role': 'user', 'content': 'Return concise JSON only. Limit to the five most important findings, brief evidence and fixes.'})
+            continue
         if attempt or not (isinstance(result, ValidationError) or
                            type(result).__name__ == "OutputParserException"):
             raise result

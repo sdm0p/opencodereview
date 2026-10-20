@@ -234,7 +234,7 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
         result["ragas"] = {
             "status": "skipped",
             "scores": result.get("ragas_scores") or {},
-            "reason": "No retrieval context was available for RAGAS evaluation",
+            "reason": "Review incomplete; scoring was not started" if result.get("status") == "incomplete" else "No retrieval context was available for RAGAS evaluation",
         }
     else:
         if job.get("ragas_status") in {"failed", "unavailable", "completed_no_scores"}:

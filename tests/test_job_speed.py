@@ -16,6 +16,15 @@ import pytest
 from fastapi import HTTPException
 
 
+def test_incomplete_review_never_starts_ragas():
+    tree = ast.parse(Path('app.py').read_text(encoding='utf-8'))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_ragas_inputs_from_state')
+    ns = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), 'app.py', 'exec'), ns)
+    state = SimpleNamespace(values={'verdict': SimpleNamespace(recommendation='incomplete'), 'diff': 'change'})
+    assert ns['_ragas_inputs_from_state'](state, 'custom') is None
+
+
 def scheduler():
     tree = ast.parse(Path('api.py').read_text(encoding='utf-8'))
     names = {'create_review', 'cancel_review', '_public_job', 'get_review', 'decide_review'}
