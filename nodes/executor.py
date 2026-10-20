@@ -17,6 +17,7 @@ GITHUB_API_BASE = "https://api.github.com"
 
 
 _GITHUB_SESSION: GitHubSession | None = None
+_POST_ERRORS: list[str] = []
 
 
 def _gh_session() -> GitHubSession:
@@ -102,6 +103,7 @@ def _post_review_comment(
             "Failed to post inline comment: HTTP %s — %s",
             resp.status_code, resp.text[:200],
         )
+        _POST_ERRORS.append(f"inline:{resp.status_code}:{resp.text[:200]}")
         return False
     except requests.RequestException as exc:
         logger.warning("Request failed for inline comment: %s", exc)
@@ -125,6 +127,7 @@ def _post_issue_comment(owner: str, repo: str, pr_number: int, body: str) -> boo
             "Failed to post fallback comment: HTTP %s — %s",
             resp.status_code, resp.text[:200],
         )
+        _POST_ERRORS.append(f"issue:{resp.status_code}:{resp.text[:200]}")
         return False
     except requests.RequestException as exc:
         logger.warning("Request failed for fallback comment: %s", exc)
@@ -209,6 +212,8 @@ def executor_node(state: OpenCodeReviewState) -> dict:
     if not state.human_approved:
         logger.info("Not approved \u2014 skipping executor")
         return {"posting_result": {"status": "skipped", "reason": "not_approved"}}
+
+    _POST_ERRORS.clear()
 
     parts = state.repo.split("/")
     if len(parts) != 2:
@@ -319,4 +324,5 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         "finding_failed": finding_failed,
         "verdict_failed": verdict_failed,
         "verdict_posted": verdict_posted,
+        "errors": list(_POST_ERRORS),
     }}
