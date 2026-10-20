@@ -14,6 +14,9 @@
 - Live validation on `calcom/cal.com#8087` detected all four unawaited
   `forEach(async ...)` defects and returned `request_changes` with four high
   findings (score 2/10).
+- The approve path was exercised on that live job and persisted a truthful
+  `post_failed` receipt: 0 inline comments, 0 fallback comments, 4 finding
+  failures, and 1 verdict failure.
 - Deterministic correctness checks survive remote-provider failures, and model
   prompts now bound diff and changed-file context to free-provider limits.
 
