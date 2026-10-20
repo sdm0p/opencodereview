@@ -13,6 +13,11 @@ Analyse the PR diff and changed files below.  Look ONLY for:
    double-close, use-after-free, invalidated iterators.
 6. **Concurrency hazards in the diff** — shared-mutation without locks, race
    windows, incorrect locking order.
+7. **Async control-flow hazards** — `forEach(async ...)` or other
+   fire-and-forget callbacks whose promises are not awaited, missing
+   `Promise.all`/sequential loops, and errors that cannot reach surrounding
+   `try/catch` blocks. Treat these as correctness issues because they can
+   cause incomplete work, races, and unhandled rejections.
 
 **Do NOT** comment on:
 - Code style, formatting, naming conventions, or readability.
