@@ -41,7 +41,8 @@ def _rate_limit(request: Request) -> None:
     if limit <= 0:
         return
     now = datetime.now(timezone.utc).timestamp()
-    key = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+    key = (forwarded.split(",", 1)[0].strip() if forwarded else None) or "global"
     with _rate_lock:
         window = [stamp for stamp in _rate_windows.get(key, []) if now - stamp < 60]
         if len(window) >= limit:
