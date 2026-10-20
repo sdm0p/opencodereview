@@ -56,7 +56,7 @@ def main() -> None:
         repo_type="dataset",
     )
     rows = pq.read_table(offline_path).to_pylist()
-    totals = {"rows": 0, "gold_findings": 0, "pred_findings": 0, "matched": 0, "false_positives": 0, "missed": 0}
+    totals = {"rows": 0, "gold_findings": 0, "pred_findings": 0, "matched": 0, "false_positives": 0, "missed": 0, "severity_correct": 0, "category_correct": 0}
     failures = []
     for row in rows:
         if args.max_rows and totals["rows"] >= args.max_rows: break
@@ -71,14 +71,24 @@ def main() -> None:
                 if i in used: continue
                 score, ok = match(finding, target)
                 if ok and (best is None or score > best[0]): best = (score, i)
-            if best: used.add(best[1]); matched += 1
+            if best:
+                used.add(best[1]); matched += 1
+                target = gold[best[1]]
+                if finding.get("severity") and target.get("severity") and str(finding["severity"]).lower() == str(target["severity"]).lower():
+                    totals["severity_correct"] += 1
+                if finding.get("category") and target.get("category") and str(finding["category"]).lower() == str(target["category"]).lower():
+                    totals["category_correct"] += 1
         totals["rows"] += 1; totals["gold_findings"] += len(gold); totals["pred_findings"] += len(generated); totals["matched"] += matched
         totals["false_positives"] += len(generated) - matched; totals["missed"] += len(gold) - matched
         if len(generated) - matched or len(gold) - matched:
             failures.append({"task_id": key, "gold": len(gold), "predicted": len(generated), "matched": matched})
     precision = totals["matched"] / totals["pred_findings"] if totals["pred_findings"] else 0.0
     recall = totals["matched"] / totals["gold_findings"] if totals["gold_findings"] else 0.0
-    result = {**totals, "precision": precision, "recall": recall, "f1": 2*precision*recall/(precision+recall) if precision+recall else 0.0, "failures": failures}
+    result = {**totals, "precision": precision, "recall": recall, "f1": 2*precision*recall/(precision+recall) if precision+recall else 0.0,
+              "severity_accuracy": totals["severity_correct"] / totals["matched"] if totals["matched"] else 0.0,
+              "category_accuracy": totals["category_correct"] / totals["matched"] if totals["matched"] else 0.0,
+              "false_positive_rate": totals["false_positives"] / totals["pred_findings"] if totals["pred_findings"] else 0.0,
+              "failures": failures}
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({k: result[k] for k in ("rows","precision","recall","f1","false_positives","missed")}, indent=2))
 
