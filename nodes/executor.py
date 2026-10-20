@@ -294,7 +294,9 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         "posted" if state.verdict else "skipped",
         owner, repo_name, pr_number,
     )
-    failed = total - inline_ok - fallback_ok
+    finding_failed = total - inline_ok - fallback_ok
+    verdict_failed = int(state.verdict is not None and not verdict_posted)
+    failed = finding_failed + verdict_failed
     # A review is fully posted only when every finding and the verdict were
     # accepted by GitHub. Keep the per-part counts so the API/UI can explain a
     # partial result instead of reporting a misleading success.
@@ -314,5 +316,7 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         "inline_posted": inline_ok,
         "fallback_posted": fallback_ok,
         "failed": failed,
+        "finding_failed": finding_failed,
+        "verdict_failed": verdict_failed,
         "verdict_posted": verdict_posted,
     }}
