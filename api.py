@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _ragas_tasks, _ragas_lock
+from app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _ragas_tasks, _ragas_lock, _spawn_ragas_background
 from graph import build_graph
 from observability import TokenCostCallback, flush_langfuse, get_langfuse_handler
 from state import Finding, Verdict
@@ -184,11 +184,11 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             _jobs[job_id]["status"] = "processing"
             _save_job(_jobs[job_id])
     try:
-        state, config, cost, ragas = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
+        state, config, cost, ragas, ragas_inputs = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
         verdict: Verdict | None = state.values.get("verdict")
         findings: list[Finding] = state.values.get("final_findings", [])
         with _lock:
-            _jobs[job_id].update(status="awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None)
+            _jobs[job_id].update(status="awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None, ragas_inputs=ragas_inputs or None)
             _save_job(_jobs[job_id])
     except Exception as exc:
         with _lock:
@@ -204,6 +204,16 @@ def _hydrate_jobs() -> None:
             continue
         status = persisted.get("status")
         _jobs[job_id] = persisted
+        if persisted.get("ragas_inputs") and persisted.get("ragas_task_id") and not persisted.get("ragas_scores"):
+            new_task = _spawn_ragas_background(
+                persisted["ragas_inputs"],
+                persisted.get("repo", ""),
+                int(persisted.get("pr_number", 0)),
+                None,
+                None,
+            )
+            persisted["ragas_task_id"] = new_task
+            _save_job(persisted)
         if status in {"queued", "processing", "processing_decision"}:
             # Decision processing cannot be safely replayed without an explicit
             # user action; review execution can be resumed idempotently.

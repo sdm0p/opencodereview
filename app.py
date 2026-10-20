@@ -237,7 +237,7 @@ def _build_and_stream(
         conn.close()
     flush_langfuse()
 
-    return state, config, cost_tracker.summary(), ragas_out
+    return state, config, cost_tracker.summary(), ragas_out, ragas_inputs
 
 
 def _format_findings_table(findings: list) -> str:
@@ -890,7 +890,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
 
     t0 = time.time()
     try:
-        state, config, cost_summary, ragas_out = _build_and_stream(
+        state, config, cost_summary, ragas_out, _ragas_inputs = _build_and_stream(
             repo.strip(), int(pr_number), endpoint_name, ragas_background=True,
         )
     except Exception as exc:
