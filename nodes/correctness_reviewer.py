@@ -120,37 +120,8 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
         logger.info("No diff to review — skipping correctness review")
         return {}
 
-    # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
-    try:
-        llm = create_llm(endpoint=state.endpoint or None)
-    except ValueError as exc:
-        logger.warning("LLM unavailable — skipping correctness review: %s", exc)
-        return {}
-    structured_llm = llm.with_structured_output(CorrectnessReview)
-
-    # --- Build the prompt ----------------------------------------------------
-    user_prompt = _build_prompt(state)
-    logger.info(
-        "Invoking correctness reviewer (diff=%s, context=%d chunks, prompt=%s, prompt_version=%s)",
-        _human_size(len(state.diff or "")),
-        len(state.context_chunks),
-        _human_size(len(user_prompt)),
-        PROMPT_VERSION,
-    )
-
-    # --- Invoke --------------------------------------------------------------
-    try:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        result: CorrectnessReview = structured_llm.invoke(messages)  # type: ignore[assignment]
-    except Exception as exc:
-        logger.warning("Correctness review LLM call failed: %s", exc)
-        return {}
-
-    # Deterministic guard for a high-impact async anti-pattern that LLMs can
-    # miss: promises created by forEach are not awaited by the caller.
+    # Run deterministic checks before the model call so provider failures do
+    # not erase high-confidence findings.
     static_findings = []
     current_file = "unknown"
     current_line = 0
@@ -175,6 +146,37 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
         if raw_line.startswith("+") and not raw_line.startswith("+++"):
             current_line += 1
 
+    # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
+    try:
+        llm = create_llm(endpoint=state.endpoint or None)
+    except ValueError as exc:
+        logger.warning("LLM unavailable — skipping correctness review: %s", exc)
+        return {"findings": static_findings} if static_findings else {}
+    structured_llm = llm.with_structured_output(CorrectnessReview)
+
+    # --- Build the prompt ----------------------------------------------------
+    user_prompt = _build_prompt(state)
+    logger.info(
+        "Invoking correctness reviewer (diff=%s, context=%d chunks, prompt=%s, prompt_version=%s)",
+        _human_size(len(state.diff or "")),
+        len(state.context_chunks),
+        _human_size(len(user_prompt)),
+        PROMPT_VERSION,
+    )
+
+    # --- Invoke --------------------------------------------------------------
+    try:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        result: CorrectnessReview = structured_llm.invoke(messages)  # type: ignore[assignment]
+    except Exception as exc:
+        logger.warning("Correctness review LLM call failed: %s", exc)
+        return {"findings": static_findings} if static_findings else {}
+
+    # Deterministic guard for a high-impact async anti-pattern that LLMs can
+    # miss: promises created by forEach are not awaited by the caller.
     result.findings.extend(static_findings)
 
     # --- Log and return findings ---------------------------------------------
