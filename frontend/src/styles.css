@@ -15,3 +15,6 @@ body{background:#fbfbfa;color:#2f3437}.topbar{background:#fff;border-color:#eaea
 
 /* Friendly canvas: soft sage tint with warm white reading surfaces */
 :root{background:#f3f7f4}body{background:#f3f7f4}.topbar,.panel,.review-preview,.auth-wall{background:#fffdf9}.content{background:transparent}
+
+/* Powder-blue canvas for stronger separation from white surfaces */
+:root{background:#dfeaf1}body{background:#dfeaf1}.topbar{background:#eaf2f6}.panel,.review-preview,.auth-wall{background:#f8fbfc}
