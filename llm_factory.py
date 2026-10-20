@@ -233,14 +233,16 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
                 "or add it in the UI."
             )
 
-    llm = _get_gemini_chat(**kwargs)
-    if llm is not None:
-        logger.debug("Using Gemini (model=%s)", kwargs.get("model", GEMINI_MODEL))
-        return llm
-
+    # Prefer Groq when configured: it has a separate quota pool and avoids
+    # stalling the review pipeline on Gemini free-tier exhaustion.
     llm = _get_groq_chat(**kwargs)
     if llm is not None:
-        logger.debug("Falling back to Groq (model=%s)", kwargs.get("model", GROQ_MODEL))
+        logger.debug("Using Groq (model=%s)", kwargs.get("model", GROQ_MODEL))
+        return llm
+
+    llm = _get_gemini_chat(**kwargs)
+    if llm is not None:
+        logger.debug("Falling back to Gemini (model=%s)", kwargs.get("model", GEMINI_MODEL))
         return llm
 
     raise ValueError(
