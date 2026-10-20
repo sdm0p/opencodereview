@@ -19,6 +19,8 @@
   failures, and 1 verdict failure.
 - API rate limiting is enabled at 10 requests/minute and was verified live
   behind the Hugging Face proxy with a safe concurrent test producing HTTP 429.
+- Review creation idempotency was verified live: repeated submissions with the
+  same `Idempotency-Key` returned the same persisted job ID.
 - Deterministic correctness checks survive remote-provider failures, and model
   prompts now bound diff and changed-file context to free-provider limits.
 
