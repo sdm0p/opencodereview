@@ -177,7 +177,7 @@ def _build_and_stream(
 
         try:
             t0 = time.time()
-            initial = {"repo": repo, "pr_number": pr_number, "review_mode": review_mode, "incremental_base_sha": baseline_sha}
+            initial = {"repo": repo, "pr_number": pr_number, "review_mode": review_mode, "incremental_base_sha": baseline_sha or ""}
             if endpoint_name:
                 initial["endpoint"] = endpoint_name
             for event in graph.stream(initial, config):
