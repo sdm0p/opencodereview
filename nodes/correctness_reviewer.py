@@ -146,6 +146,8 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
         if raw_line.startswith("+") and not raw_line.startswith("+++"):
             current_line += 1
 
+    logger.info("Deterministic correctness checks found %d issue(s)", len(static_findings))
+
     # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
     try:
         llm = create_llm(endpoint=state.endpoint or None)
