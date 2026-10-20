@@ -119,6 +119,7 @@ def _build_and_stream(
     pr_number: int,
     endpoint_name: str = "",
     ragas_background: bool = False,
+    ragas_result_callback=None,
 ) -> tuple:
     """Build the graph, stream up to the interrupt, and return state + config.
 
@@ -224,6 +225,7 @@ def _build_and_stream(
                 # explicitly instead.
                 ragas_out = _spawn_ragas_background(
                     ragas_inputs, repo, pr_number, run_trace_id, None,
+                    ragas_result_callback,
                 )
             else:
                 ragas_out = _compute_and_log_ragas(
@@ -516,6 +518,7 @@ def _ragas_worker(
     pr_number: int,
     run_trace_id: str | None,
     handler,
+    result_callback=None,
 ) -> None:
     """Daemon thread body: compute scores, stash them for the Timer poll."""
     timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
@@ -540,6 +543,8 @@ def _ragas_worker(
                 if entry is not None:
                     entry["error"] = f"RAGAS exceeded {int(timeout)} second timeout"
                     entry["done"] = True
+            if result_callback:
+                result_callback({}, f"RAGAS exceeded {int(timeout)} second timeout")
             pool.shutdown(wait=False, cancel_futures=True)
             return
         else:
@@ -551,12 +556,16 @@ def _ragas_worker(
             if entry is not None:
                 entry["error"] = str(exc)[:500]
                 entry["done"] = True
+        if result_callback:
+            result_callback({}, str(exc)[:500])
         return
     with _ragas_lock:
         entry = _ragas_tasks.get(task_id)
         if entry is not None:
             entry["scores"] = scores or {}
             entry["done"] = True
+    if result_callback:
+        result_callback(scores or {}, None)
     # Ship the Langfuse scores logged from this thread.
     flush_langfuse()
 
@@ -567,6 +576,7 @@ def _spawn_ragas_background(
     pr_number: int,
     run_trace_id: str | None,
     handler,
+    result_callback=None,
 ) -> str:
     """Start RAGAS scoring on a daemon thread; return a task id to poll."""
     task_id = f"ragas-{uuid.uuid4().hex[:12]}"
@@ -581,7 +591,7 @@ def _spawn_ragas_background(
                     break
     threading.Thread(
         target=_ragas_worker,
-        args=(task_id, inputs, repo, pr_number, run_trace_id, handler),
+        args=(task_id, inputs, repo, pr_number, run_trace_id, handler, result_callback),
         name=f"ragas-{task_id}",
         daemon=True,
     ).start()

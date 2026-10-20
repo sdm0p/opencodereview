@@ -217,7 +217,23 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             _jobs[job_id]["status"] = "processing"
             _save_job(_jobs[job_id])
     try:
-        state, config, cost, ragas, ragas_inputs = _build_and_stream(request.repo, request.pr_number, _normalize_endpoint_name(request.endpoint), ragas_background=True)
+        def save_ragas(scores: dict, error: str | None) -> None:
+            with _lock:
+                live = _jobs.get(job_id)
+                if live is None:
+                    return
+                live["ragas_scores"] = scores or None
+                live["ragas_status"] = "failed" if error else ("completed" if scores else "completed_no_scores")
+                live["ragas_error"] = error
+                _save_job(live)
+
+        state, config, cost, ragas, ragas_inputs = _build_and_stream(
+            request.repo,
+            request.pr_number,
+            _normalize_endpoint_name(request.endpoint),
+            ragas_background=True,
+            ragas_result_callback=save_ragas,
+        )
         verdict: Verdict | None = state.values.get("verdict")
         findings: list[Finding] = state.values.get("final_findings", [])
         with _lock:
