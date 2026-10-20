@@ -175,15 +175,20 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 
         from llm_factory import _get_groq_chat, _get_gemini_chat
 
-        # max_retries=5: residual 429s (rate limit) retry instead of failing
-        # a metric; combined with the throttle below, the burst stays under
-        # the provider's per-minute limit so retries are the exception.
-        llm = _get_groq_chat(temperature=0, max_retries=5)
+        # Keep evaluation bounded: RAGAS runs several provider calls and
+        # retrying each one can otherwise hold a review open for minutes.
+        configured_model = os.getenv("RAGAS_MODEL", "").strip()
+        if configured_model.startswith("groq/"):
+            configured_model = configured_model.split("/", 1)[1]
+        groq_kwargs = {"temperature": 0, "max_retries": 1}
+        if configured_model:
+            groq_kwargs["model"] = configured_model
+        llm = _get_groq_chat(**groq_kwargs)
         if llm is None:
             logger.info(
                 "RAGAS evaluator: GROQ_API_KEY not set — falling back to Gemini"
             )
-            llm = _get_gemini_chat(temperature=0, max_retries=5)
+            llm = _get_gemini_chat(temperature=0, max_retries=1)
         if llm is None:
             raise ValueError(
                 "No LLM available for RAGAS scoring. "
