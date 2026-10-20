@@ -98,6 +98,15 @@ def test_coverage_reviewer_node(state: OpenCodeReviewState) -> dict:
         logger.info("No diff to review — skipping test-coverage review")
         return {}
 
+    # Fast mode avoids a test specialist for documentation-only changes.
+    # Security and correctness still run; executable/config/unknown files
+    # always retain all reviewers, as does Thorough mode.
+    if state.review_mode == 'fast' and state.changed_files and all(
+        cf.path.lower().endswith(('.md', '.rst', '.txt')) for cf in state.changed_files
+    ):
+        return {'review_stages': [{'reviewer': 'test_coverage', 'status': 'skipped',
+                'reason': 'Fast mode: documentation-only changes', 'duration_seconds': 0.0, 'model': ''}]}
+
     try:
         llm = create_llm(endpoint=state.endpoint or None, **({"max_tokens": 1200, "timeout": 40} if state.review_mode == "fast" else {}))
     except ValueError as exc:

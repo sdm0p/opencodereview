@@ -39,8 +39,8 @@ function ReviewProgress({ job }) {
   return <section className="review-progress" aria-label="Review progress" aria-live="polite">
     {job.status === "incomplete" && <p className="message error">Review incomplete. Failed reviewers do not mean the code is free of issues.</p>}
     <div className="metrics">{job.elapsed_seconds != null && <span>Elapsed: {Math.round(job.elapsed_seconds)}s</span>}{job.review_mode && <span>{pretty(job.review_mode)} review</span>}{job.progress?.completed_stages?.length > 0 && <span>{job.progress.completed_stages.length} stages finished</span>}</div>
-    {stages.length > 0 && <ul className="reviewer-stages">{stages.map((stage, index) => <li key={`${stage.reviewer}-${index}`}><strong>{pretty(stage.reviewer)}</strong><span>{pretty(stage.status)}{stage.duration_seconds != null ? ` · ${stage.duration_seconds.toFixed(1)}s` : ""}</span>{stage.model && <small>{stage.model}</small>}{stage.error && <small className="reviewer-error">{stage.error}</small>}</li>)}</ul>}
-    {Object.keys(timings).length > 0 && <details><summary>Stage timings</summary><ul>{Object.entries(timings).map(([name, seconds]) => <li key={name}>{pretty(name)}: {Number(seconds).toFixed(1)}s</li>)}</ul></details>}
+    {stages.length > 0 && <ul className="reviewer-stages">{stages.map((stage, index) => <li key={`${stage.reviewer}-${index}`}><strong>{pretty(stage.reviewer)}</strong><span>{pretty(stage.status)}{stage.duration_seconds != null ? ` · ${stage.duration_seconds.toFixed(1)}s` : ""}</span>{stage.model && <small>{stage.model}</small>}{stage.reason && <small>{stage.reason}</small>}{stage.error && <small className="reviewer-error">{stage.error}</small>}</li>)}</ul>}
+    {Object.keys(timings).length > 0 && <details><summary>Stage completion times (since review start)</summary><ul>{Object.entries(timings).map(([name, seconds]) => <li key={name}>{pretty(name)}: {Number(seconds).toFixed(1)}s</li>)}</ul></details>}
   </section>;
 }
 

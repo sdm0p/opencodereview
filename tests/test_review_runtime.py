@@ -9,6 +9,8 @@ from nodes.review_runtime import invoke_review
 from nodes.aggregator import aggregator_node
 from nodes.security_reviewer import security_reviewer_node
 from state import OpenCodeReviewState
+from state import ChangedFile
+from nodes.test_coverage_reviewer import test_coverage_reviewer_node as coverage_node
 
 
 class Review(BaseModel):
@@ -27,6 +29,12 @@ def test_tracing_context_survives_deadline_worker():
         assert invoke_review(model, Review, []).findings == []
     finally:
         trace.reset(token)
+
+
+def test_fast_documentation_routes_without_test_specialist():
+    state = OpenCodeReviewState(diff='+documentation', review_mode='fast', changed_files=[
+        ChangedFile(path='README.md', status='modified', content='documentation', diff_hunk='+documentation')])
+    assert coverage_node(state)['review_stages'][0]['status'] == 'skipped'
 
 
 def model_with_results(*results):
