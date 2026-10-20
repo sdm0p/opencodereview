@@ -23,7 +23,10 @@ PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"correctness
 # Max characters of context to include in the prompt (soft limit)
 MAX_CONTEXT_CHARS = 6_000
 # Max changed-file content to include per file
-MAX_FILE_CONTENT_CHARS = 4_000
+MAX_FILE_CONTENT_CHARS = 1_200
+# Keep model requests below free-provider token limits. Deterministic checks
+# still inspect the complete diff from state.diff.
+MAX_DIFF_CHARS = 14_000
 
 
 # ─── Load prompt from file ──────────────────────────────────────────────────
@@ -72,7 +75,10 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
     lines: list[str] = []
 
     lines.append("## Diff\n```diff")
-    lines.append(state.diff or "")
+    diff = state.diff or ""
+    if len(diff) > MAX_DIFF_CHARS:
+        diff = diff[:MAX_DIFF_CHARS] + "\n… (diff truncated for model context)"
+    lines.append(diff)
     lines.append("```\n")
 
     # Changed files with full content (truncated per file)
