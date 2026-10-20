@@ -50,7 +50,7 @@ class Verdict(BaseModel):
     """Aggregated final verdict across all findings."""
     summary: str
     approved: bool
-    overall_score: float = Field(ge=0.0, le=10.0)
+    overall_score: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     critical_count: int = 0
     high_count: int = 0
     recommendation: str  # "approve" | "request_changes" | "block"
@@ -65,6 +65,8 @@ class OpenCodeReviewState(BaseModel):
     # PR metadata: set-once, single values
     repo: str = ""
     pr_number: int = 0
+    head_sha: str = ""
+    incremental_base_sha: str = ""
     base_sha: str = ""  # SHA of the base branch (used as vector-store cache key)
     diff: Optional[str] = None
     changed_files: list[ChangedFile] = Field(default_factory=list)
@@ -72,12 +74,15 @@ class OpenCodeReviewState(BaseModel):
     # Custom LLM endpoint chosen for this run (name from OCR_ENDPOINT_* env
     # configs).  Empty string means "use the built-in default provider".
     endpoint: str = ""
+    review_mode: str = "thorough"
 
     # Retrieved context: accumulated across parallel retrieval nodes
     context_chunks: Annotated[list[ContextChunk], add] = Field(default_factory=list)
 
     # Review findings: accumulated across parallel review agents
     findings: Annotated[list[Finding], add] = Field(default_factory=list)
+
+    review_stages: Annotated[list[dict], add] = Field(default_factory=list)
 
     # Aggregated (deduped, noise-filtered) findings: set-once by aggregator
     final_findings: list[Finding] = Field(default_factory=list)

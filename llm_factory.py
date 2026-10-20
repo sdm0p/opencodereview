@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 DEFAULT_TEMPERATURE = 0.0
+DEFAULT_REQUEST_TIMEOUT = float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "60"))
+DEFAULT_OUTPUT_TOKENS = int(os.getenv("OCR_MODEL_MAX_OUTPUT_TOKENS", "2000"))
 
 
 def _get_gemini_chat(**kwargs: Any) -> Optional[Any]:
@@ -33,6 +35,9 @@ def _get_gemini_chat(**kwargs: Any) -> Optional[Any]:
     Returns ``None`` silently when the key is missing or the package is not
     installed — callers are expected to fall back.
     """
+    kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
+    kwargs.setdefault("max_retries", 0)
+    kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
@@ -56,6 +61,9 @@ def _get_gemini_chat(**kwargs: Any) -> Optional[Any]:
 
 def _get_groq_chat(**kwargs: Any) -> Optional[Any]:
     """Create a ``ChatGroq`` instance if ``GROQ_API_KEY`` is set."""
+    kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
+    kwargs.setdefault("max_retries", 0)
+    kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return None
@@ -109,6 +117,9 @@ def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
             f"Endpoint '{endpoint.name}' is missing an API key or model name."
         )
 
+    kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
+    kwargs.setdefault("max_retries", 0)
+    kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
     provider = endpoint.provider
     model = endpoint.model
     temperature = kwargs.pop("temperature", DEFAULT_TEMPERATURE)

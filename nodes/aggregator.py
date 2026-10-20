@@ -214,6 +214,13 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
       2. Rule-based verdict by default (fast, ~10ms), or optional LLM critic
          when ``USE_LLM_CRITIC`` is enabled.
     """
+    failed = [stage for stage in state.review_stages if stage.get("status") == "failed"]
+    if failed:
+        names = ", ".join(stage["reviewer"] for stage in failed)
+        return {"final_findings": _deduplicate(state.findings), "verdict": Verdict(
+            summary=f"Review incomplete: {names} failed. Findings are partial; no approval or quality score is available.",
+            approved=False, overall_score=None, recommendation="incomplete",
+        )}
     raw_findings = state.findings
     if not raw_findings:
         logger.info("No findings to aggregate — producing empty verdict")

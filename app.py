@@ -120,6 +120,9 @@ def _build_and_stream(
     endpoint_name: str = "",
     ragas_background: bool = False,
     ragas_result_callback=None,
+    progress_callback=None,
+    review_mode: str = "thorough",
+    baseline_sha: str | None = None,
 ) -> tuple:
     """Build the graph, stream up to the interrupt, and return state + config.
 
@@ -174,16 +177,22 @@ def _build_and_stream(
 
         try:
             t0 = time.time()
-            initial = {"repo": repo, "pr_number": pr_number}
+            initial = {"repo": repo, "pr_number": pr_number, "review_mode": review_mode, "incremental_base_sha": baseline_sha}
             if endpoint_name:
                 initial["endpoint"] = endpoint_name
             for event in graph.stream(initial, config):
                 for node_name in event:
                     label = NODE_LABELS.get(node_name, node_name)
                     logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+                    if progress_callback:
+                        progress_callback(node_name, time.time() - t0, event.get(node_name))
             logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
         except Exception as exc:
             log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
+            conn = getattr(graph, "_opencodereview_conn", None)
+            if conn:
+                conn.close()
+            flush_langfuse()
             raise
 
         state = graph.get_state(config)
@@ -197,7 +206,7 @@ def _build_and_stream(
 
         verdict = state.values.get("verdict")
         findings = state.values.get("final_findings", [])
-        if verdict:
+        if verdict and verdict.overall_score is not None:
             log_langfuse_score(
                 name="verdict_score",
                 value=verdict.overall_score,
@@ -239,7 +248,7 @@ def _build_and_stream(
         conn.close()
     flush_langfuse()
 
-    return state, config, cost_tracker.summary(), ragas_out, ragas_inputs
+    return state, config, cost_tracker.summary(), ragas_out, ({**ragas_inputs, "endpoint": None} if ragas_inputs else None)
 
 
 def _format_findings_table(findings: list) -> str:
@@ -296,7 +305,8 @@ def _format_verdict(verdict: Verdict | None) -> str:
         else "#dc2626" if verdict.recommendation == "block"
         else "#ea580c"
     )
-    pct = max(0, min(100, int(verdict.overall_score * 10)))
+    pct = max(0, min(100, int((verdict.overall_score or 0) * 10)))
+    score_label = f"{verdict.overall_score:.1f}/10" if verdict.overall_score is not None else "Not scored"
 
     chips = []
     if verdict.critical_count:
@@ -320,7 +330,7 @@ def _format_verdict(verdict: Verdict | None) -> str:
         '<div class="verdict-head">'
         f'<span class="verdict-icon">{icon}</span>'
         f'<span class="verdict-reco" style="color:{color}">{verdict.recommendation.upper()}</span>'
-        f'<span class="verdict-score">Score <b>{verdict.overall_score:.1f}</b>/10</span>'
+        f'<span class="verdict-score">Score <b>{score_label}</b></span>'
         "</div>"
         f'<div class="score-track"><div class="score-fill" style="width:{pct}%;background:{color}"></div></div>'
         f'<p class="verdict-summary">{html.escape(str(verdict.summary))}</p>'
@@ -466,7 +476,7 @@ def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
         "query": query,
         "contexts": contexts,
         "answer": answer_text,
-        "endpoint": endpoint_name or None,
+        "endpoint": __import__("endpoints").get_endpoint(endpoint_name) if endpoint_name else None,
     }
 
 

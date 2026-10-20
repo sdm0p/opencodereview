@@ -85,8 +85,27 @@ class _ThrottledChatModel:
     def __init__(self, model, interval: float | None = None):
         self._model = model
         self._interval = _RAGAS_INTERVAL if interval is None else interval
+        self._quota_exhausted = False
+
+    def _call(self, method, *args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) in {401, 403, 429} or any(value in str(exc).lower() for value in ("rate_limit_exceeded", "insufficient_quota")):
+                self._quota_exhausted = True
+            raise
+
+    async def _acall(self, method, *args, **kwargs):
+        try:
+            return await method(*args, **kwargs)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) in {401, 403, 429} or any(value in str(exc).lower() for value in ("rate_limit_exceeded", "insufficient_quota")):
+                self._quota_exhausted = True
+            raise
 
     def _wait(self) -> None:
+        if self._quota_exhausted:
+            raise RuntimeError("Evaluation stopped: provider authentication or quota limit; no further calls will be made for this evaluation.")
         if self._interval > 0:
             with _ragas_throttle_lock:
                 time.sleep(self._interval)
@@ -94,7 +113,7 @@ class _ThrottledChatModel:
     # ── Sync entry points ───────────────────────────────────────────────
     def invoke(self, *args, **kwargs):
         self._wait()
-        return self._model.invoke(*args, **kwargs)
+        return self._call(self._model.invoke, *args, **kwargs)
 
     def generate(self, messages, *args, **kwargs):
         # Serialize LangChain batch calls into individual throttled
@@ -111,17 +130,17 @@ class _ThrottledChatModel:
                 self._wait()
                 # invoke() does not accept callbacks/run_manager/config that
                 # ragas may forward to generate() — drop them here.
-                resp = self._model.invoke(msgs)
+                resp = self._call(self._model.invoke, msgs)
                 text = resp.content if hasattr(resp, "content") else str(resp)
                 generations.append([Generation(text=text, message=resp)])
             return LLMResult(generations=generations, llm_output=None)
         self._wait()
-        return self._model.generate(messages, *args, **kwargs)
+        return self._call(self._model.generate, messages, *args, **kwargs)
 
     # ── Async entry points ──────────────────────────────────────────────
     async def ainvoke(self, *args, **kwargs):
         self._wait()
-        return await self._model.ainvoke(*args, **kwargs)
+        return await self._acall(self._model.ainvoke, *args, **kwargs)
 
     async def agenerate(self, messages, *args, **kwargs):
         if (
@@ -135,12 +154,12 @@ class _ThrottledChatModel:
             for msgs in messages:
                 self._wait()
                 # Same kwargs caveat as generate(): ainvoke has no callbacks.
-                resp = await self._model.ainvoke(msgs)
+                resp = await self._acall(self._model.ainvoke, msgs)
                 text = resp.content if hasattr(resp, "content") else str(resp)
                 generations.append([Generation(text=text, message=resp)])
             return LLMResult(generations=generations, llm_output=None)
         self._wait()
-        return await self._model.agenerate(messages, *args, **kwargs)
+        return await self._acall(self._model.agenerate, messages, *args, **kwargs)
 
     # ── Everything else passes through ──────────────────────────────────
     def __getattr__(self, name: str):
@@ -169,7 +188,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
         if endpoint:
             from llm_factory import create_llm
 
-            llm = create_llm(endpoint=endpoint, temperature=0)
+            llm = create_llm(endpoint=endpoint, temperature=0, timeout=15, max_retries=0)
             logger.info("RAGAS evaluator: using custom endpoint %s", endpoint)
             return LangchainLLMWrapper(_ThrottledChatModel(llm))
 

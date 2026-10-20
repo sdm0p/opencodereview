@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 from typing import Optional
@@ -168,55 +169,49 @@ def ingestion_node(state: OpenCodeReviewState) -> dict:
     head_repo_full: str = pr_data["head"]["repo"]["full_name"]  # "owner/repo"
     head_owner, head_repo_n = head_repo_full.split("/", 1)
 
-    # -- 3. Raw unified diff of the whole PR ----------------------------------
-    diff_resp = session.get(
-        pr_url,
-        headers={"Accept": "application/vnd.github.v3.diff"},
-        timeout=30,
-    )
+    # Explicit incremental previews compare immutable commits. Reject truncated
+    # comparisons rather than silently reporting a partial review as complete.
+    baseline = getattr(state, "incremental_base_sha", "")
+    if baseline:
+        compare_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo_name}/compare/{baseline}...{head_sha}"
+        comparison = session.get(compare_url, timeout=30)
+        comparison.raise_for_status()
+        compared = comparison.json()
+        if compared.get("status") not in {"ahead", "identical"}:
+            raise IngestionError("Incremental baseline must be an ancestor of the PR head.")
+        files_data = compared.get("files", [])
+        if len(files_data) >= 300 or compared.get("total_commits", 0) > 250:
+            raise IngestionError("Incremental comparison may be truncated; run a full review.")
+        diff_url = compare_url
+    else:
+        diff_url = pr_url
+        files_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo_name}/pulls/{pr_number}/files"
+        files_data = _fetch_all_pages(files_url, session)
+    diff_resp = session.get(diff_url, headers={"Accept": "application/vnd.github.v3.diff"}, timeout=30)
     diff_resp.raise_for_status()
     diff_text = diff_resp.text
-    logger.info("Fetched diff (%s)", _human_size(len(diff_text)))
-
-    # -- 4. Changed files with per-file patches -------------------------------
-    files_url = (
-        f"{GITHUB_API_BASE}/repos/{owner}/{repo_name}/pulls/{pr_number}/files"
-    )
-    logger.info("Fetching changed-files list …")
-    files_data = _fetch_all_pages(files_url, session)
-    logger.info("Changed files: %d", len(files_data))
+    logger.info("Fetched %s diff (%s), %d files", "incremental" if baseline else "full", _human_size(len(diff_text)), len(files_data))
 
     # -- 5. Build ChangedFile objects (full content from the head branch) -----
-    changed_files: list[ChangedFile] = []
-    for file_info in files_data:
-        file_path: str = file_info["filename"]
-        status: str = file_info["status"]
-        patch: str = file_info.get("patch") or ""
-        additions: int = file_info.get("additions", 0)
-        deletions: int = file_info.get("deletions", 0)
-
-        # Fetch from the HEAD repo of the PR (handles fork PRs correctly)
-        content = _fetch_file_content(
-            head_owner, head_repo_n, head_sha, file_path, status
+    def load_file(file_info: dict) -> ChangedFile:
+        path = file_info["filename"]
+        status = file_info["status"]
+        return ChangedFile(
+            path=path, status=status,
+            content=_fetch_file_content(head_owner, head_repo_n, head_sha, path, status),
+            diff_hunk=file_info.get("patch") or "",
         )
 
-        changed_files.append(ChangedFile(
-            path=file_path,
-            status=status,
-            content=content,
-            diff_hunk=patch,
-        ))
-
-        logger.debug(
-            "  %s — %s (+%d/-%d, %s content)",
-            file_path, status, additions, deletions,
-            _human_size(len(content)),
-        )
+    # Independent raw-file GETs use separate requests, preserve GitHub file order,
+    # and cap concurrency to avoid flooding the upstream service.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        changed_files = list(pool.map(load_file, files_data))
 
     return {
         "diff": diff_text,
         "changed_files": changed_files,
         "base_sha": base_sha,
+        "head_sha": head_sha,
     }
 
 

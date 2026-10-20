@@ -209,6 +209,8 @@ def executor_node(state: OpenCodeReviewState) -> dict:
     Requires ``GITHUB_TOKEN`` to post.  Without it, logs what it *would*
     have posted.
     """
+    if state.verdict and state.verdict.recommendation == "incomplete":
+        return {"posting_result": {"status": "skipped", "reason": "incomplete_review"}}
     if not state.human_approved:
         logger.info("Not approved \u2014 skipping executor")
         return {"posting_result": {"status": "skipped", "reason": "not_approved"}}

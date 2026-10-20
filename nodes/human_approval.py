@@ -36,7 +36,7 @@ def human_approval_node(state: OpenCodeReviewState) -> dict:
 
     if verdict:
         logger.info(
-            "Verdict: %s (score=%.1f, approved=%s)",
+            "Verdict: %s (score=%s, approved=%s)",
             verdict.recommendation, verdict.overall_score, verdict.approved,
         )
         logger.info("Summary: %s", verdict.summary)
@@ -87,5 +87,5 @@ def human_approval_node(state: OpenCodeReviewState) -> dict:
             logger.info("Human edited %d findings before approval.", len(edited_findings_raw))
 
     return {
-        "human_approved": action == "approve" or action == "edit",
+        "human_approved": (action in {"approve", "edit"}) and not (verdict and verdict.recommendation == "incomplete"),
     }

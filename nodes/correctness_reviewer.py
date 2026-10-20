@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 import logging
 import os
 import re
 from pathlib import Path
 
 from llm_factory import create_llm
+from nodes.review_runtime import changed_context, invoke_review, stage_result
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState, Severity
@@ -87,7 +89,7 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
         for cf in state.changed_files:
             header = f"### {cf.path} ({cf.status})"
             lines.append(header)
-            content = cf.content or ""
+            content = changed_context(cf, state.review_mode)
             if len(content) > MAX_FILE_CONTENT_CHARS:
                 content = content[:MAX_FILE_CONTENT_CHARS] + "\n… (truncated)"
             lines.append(f"```\n{content}\n```\n")
@@ -116,6 +118,7 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
 
 
 def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
+    started = time.monotonic()
     """Analyse the diff and context chunks for correctness issues using an LLM.
 
     Returns state updates for ``findings`` (accumulated via the ``add``
@@ -156,11 +159,10 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
 
     # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
     try:
-        llm = create_llm(endpoint=state.endpoint or None)
+        llm = create_llm(endpoint=state.endpoint or None, **({"max_tokens": 1200, "timeout": 40} if state.review_mode == "fast" else {}))
     except ValueError as exc:
         logger.warning("LLM unavailable — skipping correctness review: %s", exc)
-        return {"findings": static_findings} if static_findings else {}
-    structured_llm = llm.with_structured_output(CorrectnessReview)
+        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc)]}
 
     # --- Build the prompt ----------------------------------------------------
     user_prompt = _build_prompt(state)
@@ -178,10 +180,10 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        result: CorrectnessReview = structured_llm.invoke(messages)  # type: ignore[assignment]
+        result: CorrectnessReview = invoke_review(llm, CorrectnessReview, messages, mode=state.review_mode)  # type: ignore[assignment]
     except Exception as exc:
         logger.warning("Correctness review LLM call failed: %s", exc)
-        return {"findings": static_findings} if static_findings else {}
+        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc)]}
 
     # Deterministic guard for a high-impact async anti-pattern that LLMs can
     # miss: promises created by forEach are not awaited by the caller.
@@ -204,6 +206,7 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
 
     return {
         "findings": result.findings,
+        "review_stages": [stage_result("correctness", started, llm=llm)],
     }
 
 

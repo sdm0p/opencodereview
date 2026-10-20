@@ -7,6 +7,9 @@ the process-local registry with a durable store and queue.
 from __future__ import annotations
 
 import os
+import hashlib
+import time
+from pathlib import Path
 import json
 import secrets
 import sqlite3
@@ -139,6 +142,8 @@ class ReviewRequest(BaseModel):
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
+    review_mode: Literal["fast", "thorough"] = "thorough"
+    baseline_sha: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{40}$")
 
 
 class DecisionRequest(BaseModel):
@@ -215,7 +220,11 @@ def github_logout(request: Request) -> dict[str, str]:
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in job.items() if key not in {"config", "future"}}
+    result = {key: value for key, value in job.items() if key not in {"config", "future", "request_fingerprint", "owner_id"}}
+    now = time.time()
+    result["elapsed_seconds"] = round(max(0, now - job.get("started_timestamp", now)), 1) if job.get("status") in {"processing", "queued"} else job.get("elapsed_seconds", 0)
+    if job.get("status") == "queued":
+        result["queue_position"] = sum(1 for item in _jobs.values() if item.get("status") == "queued" and item.get("created_at", "") <= job.get("created_at", ""))
     return result
 
 def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
@@ -295,8 +304,10 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
 
 def _run_job(job_id: str, request: ReviewRequest) -> None:
     with _lock:
+        if _jobs.get(job_id, {}).get("status") == "cancelled":
+            return
         if job_id in _jobs:
-            _jobs[job_id]["status"] = "processing"
+            _jobs[job_id].update(status="processing", started_timestamp=time.time(), progress={"stage": "ingestion", "completed_stages": []})
             _save_job(_jobs[job_id])
     try:
         ephemeral_endpoint = None
@@ -317,21 +328,57 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
                 live["ragas_error"] = error
                 _save_job(live)
 
+        def progress(stage: str, elapsed: float, update: dict | None = None) -> None:
+            with _lock:
+                live = _jobs[job_id]
+                if live.get("status") == "cancelled":
+                    raise RuntimeError("Review cancelled")
+                completed = live.setdefault("progress", {}).setdefault("completed_stages", [])
+                if stage not in completed:
+                    completed.append(stage)
+                live["progress"]["stage"] = stage
+                live.setdefault("stage_timings", {})[stage] = round(elapsed, 2)
+                if isinstance(update, dict):
+                    stages = update.get("review_stages", [])
+                    if isinstance(stages, list):
+                        live.setdefault("review_stages", []).extend(stages)
+                    for key in ("findings",):
+                        for finding in update.get(key, []) or []:
+                            if hasattr(finding, "model_dump"):
+                                finding = finding.model_dump(mode="json")
+                            if isinstance(finding, dict):
+                                live.setdefault("findings", []).append(finding)
+                _save_job(live)
+
         state, config, cost, ragas, ragas_inputs = _build_and_stream(
             request.repo,
             request.pr_number,
             endpoint_name,
             ragas_background=True,
             ragas_result_callback=save_ragas,
+            progress_callback=progress,
+            review_mode=request.review_mode,
+            baseline_sha=request.baseline_sha,
         )
+        actual_head = state.values.get("head_sha")
         verdict: Verdict | None = state.values.get("verdict")
         findings: list[Finding] = state.values.get("final_findings", [])
         with _lock:
-            _jobs[job_id].update(status="awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None, ragas_inputs=ragas_inputs or None)
+            if _jobs[job_id].get("status") == "cancelled":
+                return
+            if actual_head and _jobs[job_id].get("head_sha") != actual_head:
+                # The PR moved between metadata lookup and ingestion. The result
+                # can still be viewed, but must not satisfy the old cache key.
+                _jobs[job_id]["request_fingerprint"] = None
+                _jobs[job_id]["head_sha"] = actual_head
+            stages = state.values.get("review_stages", [])
+            incomplete = bool(verdict and verdict.recommendation == "incomplete")
+            _jobs[job_id].update(review_stages=stages, elapsed_seconds=round(time.time() - _jobs[job_id]["started_timestamp"], 2), status="incomplete" if incomplete else "awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None, ragas_inputs=ragas_inputs or None)
             _save_job(_jobs[job_id])
     except Exception as exc:
         with _lock:
-            _jobs[job_id].update(status="failed", error=str(exc)[:500])
+            if _jobs[job_id].get("status") != "cancelled":
+                _jobs[job_id].update(status="failed", error=str(exc)[:500])
             _save_job(_jobs[job_id])
     finally:
         if 'ephemeral_endpoint' in locals() and ephemeral_endpoint:
@@ -346,16 +393,13 @@ def _hydrate_jobs() -> None:
             continue
         status = persisted.get("status")
         _jobs[job_id] = persisted
-        if persisted.get("ragas_inputs") and persisted.get("ragas_task_id") and not persisted.get("ragas_scores") and not persisted.get("ragas_status"):
-            new_task = _spawn_ragas_background(
-                persisted["ragas_inputs"],
-                persisted.get("repo", ""),
-                int(persisted.get("pr_number", 0)),
-                None,
-                None,
-            )
-            persisted["ragas_task_id"] = new_task
+        if persisted.get("ragas_task_id") and not persisted.get("ragas_status"):
+            persisted.update(ragas_status="unavailable", ragas_error="Evaluation interrupted by restart; it was not automatically replayed.")
             _save_job(persisted)
+        if status in {"queued", "processing"} and persisted.get("custom_provider"):
+            persisted.update(status="failed", error="Provider credentials were not persisted; resubmit this review after restart.")
+            _save_job(persisted)
+            continue
         if status in {"queued", "processing", "processing_decision"}:
             # Decision processing cannot be safely replayed without an explicit
             # user action; review execution can be resumed idempotently.
@@ -409,18 +453,59 @@ def health() -> dict[str, Any]:
 def create_review(request: ReviewRequest, http_request: Request, x_api_key: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict[str, Any]:
     _authorize_request(x_api_key, http_request)
     _rate_limit(http_request)
-    if idempotency_key:
-        with _lock:
-            for existing in _load_jobs():
-                if existing.get("idempotency_key") == idempotency_key and existing.get("repo") == request.repo and int(existing.get("pr_number", 0)) == request.pr_number:
-                    return _with_ragas(existing)
-    job_id = str(uuid.uuid4())
-    job = {"id": job_id, "repo": request.repo, "pr_number": request.pr_number, "endpoint": request.endpoint, "idempotency_key": idempotency_key, "status": "queued", "created_at": datetime.now(timezone.utc).isoformat()}
+    owner = str((_session(http_request) or {}).get("github_id") or "api-key")
+    material = request.model_dump()
+    head_sha = base_sha = None
+    try:
+        token = (_session(http_request) or {}).get("token") or os.getenv("GITHUB_TOKEN", "")
+        headers = {"Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.get(f"https://api.github.com/repos/{request.repo}/pulls/{request.pr_number}", headers=headers, timeout=6)
+        response.raise_for_status()
+        pull = response.json()
+        head_sha, base_sha = pull["head"]["sha"], pull["base"]["sha"]
+    except (requests.RequestException, KeyError, ValueError):
+        pass  # Active deduplication still works if GitHub metadata is unavailable.
+    prompt_hash = hashlib.sha256()
+    for source in sorted(Path(__file__).parent.joinpath("prompts").glob("*.txt")):
+        prompt_hash.update(source.read_bytes())
+    for source in sorted(Path(__file__).parent.joinpath("nodes").glob("*.py")):
+        prompt_hash.update(source.read_bytes())
+    material.update(head_sha=head_sha, base_sha=base_sha, pipeline_version=prompt_hash.hexdigest())
+    fingerprint = hashlib.sha256(json.dumps({"owner": owner, "request": material}, sort_keys=True).encode()).hexdigest()
+    # Reuse completed previews only for an identical immutable diff and configuration.
     with _lock:
-        _jobs[job_id] = job
-        _save_job(job)
+        existing = next((item for item in _jobs.values() if item.get("owner_id") == owner and item.get("request_fingerprint") == fingerprint and (item.get("status") in {"queued", "processing"} or (head_sha and base_sha and item.get("status") == "awaiting_approval" and time.time() - item.get("started_timestamp", 0) < 900))), None)
+        if existing is None:
+            job_id = str(uuid.uuid4())
+            job = {"id": job_id, "repo": request.repo, "pr_number": request.pr_number, "endpoint": request.endpoint, "review_mode": request.review_mode, "baseline_sha": request.baseline_sha, "custom_provider": bool(request.api_key), "head_sha": head_sha, "base_sha": base_sha, "owner_id": owner, "request_fingerprint": fingerprint, "status": "queued", "created_at": datetime.now(timezone.utc).isoformat()}
+            _jobs[job_id] = job
+            _save_job(job)
+        else:
+            job = existing
+    if existing is not None:
+        return {**_with_ragas(job), "reused": True}
     job["future"] = _executor.submit(_run_job, job_id, request)
     return _with_ragas(job)
+
+
+@app.post("/api/reviews/{job_id}/cancel")
+def cancel_review(job_id: str, request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    _authorize_request(x_api_key, request)
+    owner = str((_session(request) or {}).get("github_id") or "api-key")
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job.get("owner_id", "api-key") != owner:
+            raise HTTPException(status_code=404, detail="Review not found")
+        if job.get("status") not in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="Only queued or processing reviews can be cancelled")
+        future = job.get("future")
+        if future:
+            future.cancel()
+        job.update(status="cancelled", cancellation_note="Running calls finish within their timeout; no results will be posted.")
+        _save_job(job)
+    return _public_job(job)
 
 
 @app.get("/api/reviews/{job_id}")
@@ -431,7 +516,8 @@ def get_review(job_id: str, request: Request, x_api_key: str | None = Header(def
         job = _jobs.get(job_id)
         if not job:
             job = _load_job(job_id)
-    if not job:
+    owner = str((_session(request) or {}).get("github_id") or "api-key")
+    if not job or job.get("owner_id", "api-key") != owner:
         raise HTTPException(status_code=404, detail="Review not found")
     return _with_ragas(job)
 
@@ -440,6 +526,26 @@ def get_review(job_id: str, request: Request, x_api_key: str | None = Header(def
 def decide_review(job_id: str, request: DecisionRequest, http_request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     _authorize_request(x_api_key, http_request)
     _rate_limit(http_request)
+    with _lock:
+        preview = _jobs.get(job_id) or _load_job(job_id)
+    owner = str((_session(http_request) or {}).get("github_id") or "api-key")
+    if not preview or preview.get("owner_id", "api-key") != owner:
+        raise HTTPException(status_code=404, detail="Review not found")
+    if request.action == "approve" and preview.get("baseline_sha"):
+        raise HTTPException(status_code=409, detail="Incremental reviews are preview-only. Run a full review before posting.")
+    if preview and request.action == "approve" and preview.get("head_sha"):
+        headers = {"Accept": "application/vnd.github+json", "Cache-Control": "no-cache"}
+        token = (_session(http_request) or {}).get("token") or os.getenv("GITHUB_TOKEN", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        try:
+            response = requests.get(f"https://api.github.com/repos/{preview['repo']}/pulls/{preview['pr_number']}", headers=headers, timeout=6)
+            response.raise_for_status()
+            current = response.json()
+            if current["head"]["sha"] != preview["head_sha"] or current["base"]["sha"] != preview.get("base_sha"):
+                raise HTTPException(status_code=409, detail="PR changed since this review; start a new review before posting.")
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="Cannot verify the current PR commit; retry before posting.") from exc
     with _lock:
         job = _jobs.get(job_id)
         if not job:

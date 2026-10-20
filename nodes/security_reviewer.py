@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import time
 import logging
 import os
 from pathlib import Path
 
 from llm_factory import create_llm
+from nodes.review_runtime import changed_context, invoke_review, stage_result
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState
@@ -67,7 +69,7 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
         lines.append("## Changed files\n")
         for cf in state.changed_files:
             lines.append(f"### {cf.path} ({cf.status})")
-            content = cf.content or ""
+            content = changed_context(cf, state.review_mode)
             if len(content) > MAX_FILE_CONTENT_CHARS:
                 content = content[:MAX_FILE_CONTENT_CHARS] + "\n… (truncated)"
             lines.append(f"```\n{content}\n```\n")
@@ -93,16 +95,16 @@ def _build_prompt(state: OpenCodeReviewState) -> str:
 
 
 def security_reviewer_node(state: OpenCodeReviewState) -> dict:
+    started = time.monotonic()
     if not state.diff:
         logger.info("No diff to review — skipping security review")
         return {}
 
     try:
-        llm = create_llm(endpoint=state.endpoint or None)
+        llm = create_llm(endpoint=state.endpoint or None, **({"max_tokens": 1200, "timeout": 40} if state.review_mode == "fast" else {}))
     except ValueError as exc:
         logger.warning("LLM unavailable — skipping security review: %s", exc)
-        return {}
-    structured_llm = llm.with_structured_output(SecurityReview)
+        return {"review_stages": [stage_result("security", started, error=exc, llm=locals().get("llm"))]}
 
     user_prompt = _build_prompt(state)
     logger.info(
@@ -117,10 +119,10 @@ def security_reviewer_node(state: OpenCodeReviewState) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        result: SecurityReview = structured_llm.invoke(messages)  # type: ignore[assignment]
+        result: SecurityReview = invoke_review(llm, SecurityReview, messages, mode=state.review_mode)  # type: ignore[assignment]
     except Exception as exc:
         logger.warning("Security review LLM call failed: %s", exc)
-        return {}
+        return {"review_stages": [stage_result("security", started, error=exc, llm=locals().get("llm"))]}
 
     if result.findings:
         logger.info("Security review found %d issue(s)", len(result.findings))
@@ -129,7 +131,7 @@ def security_reviewer_node(state: OpenCodeReviewState) -> dict:
     else:
         logger.info("Security review found no issues")
 
-    return {"findings": result.findings}
+    return {"findings": result.findings, "review_stages": [stage_result("security", started, llm=llm)]}
 
 
 def _human_size(bytes_: int) -> str:
