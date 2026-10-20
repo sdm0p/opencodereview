@@ -34,7 +34,30 @@ _jobs: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("OCR_MAX_WORKERS", "2")))
 
+
+def _postgres_connect():
+    """Return a Supabase Postgres connection when configured, else None."""
+    url = os.getenv("SUPABASE_DB_URL", "").strip()
+    if not url:
+        return None
+    try:
+        import psycopg
+        return psycopg.connect(url)
+    except Exception:
+        return None
+
 def _init_jobs() -> None:
+    pg = _postgres_connect()
+    if pg is not None:
+        with pg:
+            with pg.cursor() as cur:
+                cur.execute("""create table if not exists public.review_jobs (
+                    id uuid primary key, repo text not null, pr_number integer not null,
+                    endpoint text, status text not null, payload jsonb not null,
+                    created_at timestamptz not null default now(), updated_at timestamptz not null default now())""")
+                cur.execute("create index if not exists review_jobs_status_idx on public.review_jobs (status)")
+        pg.close()
+        return
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS review_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
         conn.commit()
@@ -45,16 +68,41 @@ def _save_job(job: dict[str, Any]) -> None:
     payload = {k: v for k, v in job.items() if k not in {"future"}}
     if "config" in payload:
         payload["config"] = {"configurable": payload["config"].get("configurable", {})}
+    pg = _postgres_connect()
+    if pg is not None:
+        with pg:
+            with pg.cursor() as cur:
+                cur.execute("""insert into public.review_jobs (id, repo, pr_number, endpoint, status, payload, updated_at)
+                    values (%s, %s, %s, %s, %s, %s::jsonb, now())
+                    on conflict (id) do update set repo=excluded.repo, pr_number=excluded.pr_number,
+                    endpoint=excluded.endpoint, status=excluded.status, payload=excluded.payload, updated_at=now()""",
+                    (job["id"], job["repo"], job["pr_number"], job.get("endpoint"), job["status"], json.dumps(payload, default=str)))
+        pg.close()
+        return
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT OR REPLACE INTO review_jobs (id, payload) VALUES (?, ?)", (job["id"], json.dumps(payload, default=str)))
         conn.commit()
 
 def _load_job(job_id: str) -> dict[str, Any] | None:
+    pg = _postgres_connect()
+    if pg is not None:
+        with pg.cursor() as cur:
+            cur.execute("select payload from public.review_jobs where id = %s", (job_id,))
+            row = cur.fetchone()
+        pg.close()
+        return json.loads(row[0]) if row else None
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT payload FROM review_jobs WHERE id = ?", (job_id,)).fetchone()
     return json.loads(row[0]) if row else None
 
 def _load_jobs() -> list[dict[str, Any]]:
+    pg = _postgres_connect()
+    if pg is not None:
+        with pg.cursor() as cur:
+            cur.execute("select payload from public.review_jobs")
+            rows = cur.fetchall()
+        pg.close()
+        return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute("SELECT payload FROM review_jobs").fetchall()
     return [json.loads(row[0]) for row in rows]
@@ -188,7 +236,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "inference": "remote_provider_configured" if provider_configured else "fallback_or_unconfigured",
         "authentication": "required" if require_auth else "optional",
-        "persistence": "configured_path" if os.getenv("OPENCODEREVIEW_DB_PATH") else "local_default_path",
+        "persistence": "supabase_postgres" if os.getenv("SUPABASE_DB_URL") else ("configured_path" if os.getenv("OPENCODEREVIEW_DB_PATH") else "local_default_path"),
         "local_embeddings": False,
     }
 

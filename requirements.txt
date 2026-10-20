@@ -18,6 +18,7 @@ chromadb==1.5.8
 langsmith>=0.7
 langfuse>=4.13,<5
 requests-cache>=1.2
+psycopg[binary]>=3.2,<4
 # ragas 0.4.x keeps the single_turn_score API used by eval_data/ragas_eval.py.
 # langchain-community must stay <0.4.2: ragas imports
 # langchain_community.chat_models.vertexai at startup, and 0.4.2 removed that
