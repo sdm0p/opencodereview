@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.types import Command
 from pydantic import BaseModel, Field
@@ -33,6 +33,21 @@ app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=
 _jobs: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("OCR_MAX_WORKERS", "2")))
+_rate_lock = threading.Lock()
+_rate_windows: dict[str, list[float]] = {}
+
+def _rate_limit(request: Request) -> None:
+    limit = int(os.getenv("OCR_RATE_LIMIT_PER_MINUTE", "0") or 0)
+    if limit <= 0:
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    key = request.client.host if request.client else "unknown"
+    with _rate_lock:
+        window = [stamp for stamp in _rate_windows.get(key, []) if now - stamp < 60]
+        if len(window) >= limit:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        window.append(now)
+        _rate_windows[key] = window
 
 
 def _postgres_connect():
@@ -312,8 +327,9 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/api/reviews", status_code=202)
-def create_review(request: ReviewRequest, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+def create_review(request: ReviewRequest, http_request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     _authorize(x_api_key)
+    _rate_limit(http_request)
     job_id = str(uuid.uuid4())
     job = {"id": job_id, "repo": request.repo, "pr_number": request.pr_number, "endpoint": request.endpoint, "status": "queued", "created_at": datetime.now(timezone.utc).isoformat()}
     with _lock:
@@ -336,8 +352,9 @@ def get_review(job_id: str, x_api_key: str | None = Header(default=None)) -> dic
 
 
 @app.post("/api/reviews/{job_id}/decision")
-def decide_review(job_id: str, request: DecisionRequest, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+def decide_review(job_id: str, request: DecisionRequest, http_request: Request, x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
     _authorize(x_api_key)
+    _rate_limit(http_request)
     with _lock:
         job = _jobs.get(job_id)
         if not job:
