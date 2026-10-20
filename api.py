@@ -90,7 +90,9 @@ def _load_job(job_id: str) -> dict[str, Any] | None:
             cur.execute("select payload from public.review_jobs where id = %s", (job_id,))
             row = cur.fetchone()
         pg.close()
-        return json.loads(row[0]) if row else None
+        if not row:
+            return None
+        return json.loads(row[0]) if isinstance(row[0], str) else row[0]
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT payload FROM review_jobs WHERE id = ?", (job_id,)).fetchone()
     return json.loads(row[0]) if row else None
@@ -105,7 +107,7 @@ def _load_jobs() -> list[dict[str, Any]]:
         return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute("SELECT payload FROM review_jobs").fetchall()
-    return [json.loads(row[0]) for row in rows]
+    return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
 
 
 class ReviewRequest(BaseModel):
