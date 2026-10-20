@@ -321,6 +321,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "inference": "remote_provider_configured" if provider_configured else "fallback_or_unconfigured",
         "authentication": "required" if require_auth else "optional",
+        "rate_limit_per_minute": int(os.getenv("OCR_RATE_LIMIT_PER_MINUTE", "0") or 0),
         "persistence": persistence,
         "local_embeddings": os.getenv("OPENCODEREVIEW_ALLOW_LOCAL_EMBEDDINGS", "false").lower()
         in {"1", "true", "yes", "on"},
