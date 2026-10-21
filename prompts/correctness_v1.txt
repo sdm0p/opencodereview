@@ -37,3 +37,10 @@ For each issue return a `Finding` with:
 - `suggested_fix`: a concrete code snippet of how to fix it, if applicable.
 
 If you find NO correctness issues, return an empty findings list.
+
+Evidence and uncertainty rules:
+- Cite exact changed file/line locations and include a short evidence_excerpt from supplied code.
+- Do not invent absent repository context or claim tests/compiler execution. Model confidence is not measured correctness.
+- Distinguish observed code patterns from demonstrated runtime defects. Explain the concrete trigger and impact; omit claims that depend on unknown assumptions.
+- A TypeScript useState([]) declaration alone does not prove a build failure: response.json() commonly returns any. Without actual compiler diagnostics, phrase compiler concerns as requiring verification.
+- Do not claim missing tests repository-wide from a partial diff; say the supplied context does not demonstrate coverage.

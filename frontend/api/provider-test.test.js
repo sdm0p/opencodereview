@@ -34,3 +34,17 @@ test('probe rejects private destinations and redacts provider error credentials'
     await handler(req,res); assert.equal(res.code,400); assert.ok(!res.body.error.includes('test-secret'));
   } finally { globalThis.fetch=original; }
 });
+
+test('MiniMax probe reserves reasoning budget consistently with review calls', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      const body = JSON.parse(options.body);
+      assert.equal(body.max_tokens,8192);
+      assert.deepEqual(body.reasoning,{effort:'low'});
+      return {ok:true,json:async()=>({choices:[{message:{content:'{"findings":[]}'}}]})};
+    };
+    const req = request(), res = response(); req.body.model='minimax/minimax-m3.1-flash:free';
+    await handler(req,res); assert.equal(res.code,200);
+  } finally { globalThis.fetch=original; }
+});

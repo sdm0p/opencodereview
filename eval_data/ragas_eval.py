@@ -26,6 +26,7 @@ Lazy imports minimise overhead when RAGAS is not installed.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import logging
 import os
 import threading
@@ -69,6 +70,7 @@ def _check_ragas() -> bool:
 # OCR_RAGAS_INTERVAL env var (float seconds, 0 disables).
 _RAGAS_INTERVAL = float(os.environ.get("OCR_RAGAS_INTERVAL", "0.5") or 0.5)
 _ragas_throttle_lock = threading.Lock()
+_metric_deadline = ContextVar("ragas_metric_deadline", default=None)
 
 
 class _ThrottledChatModel:
@@ -104,6 +106,9 @@ class _ThrottledChatModel:
             raise
 
     def _wait(self) -> None:
+        deadline = _metric_deadline.get()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("Metric deadline exceeded; no further judge calls")
         if self._quota_exhausted:
             raise RuntimeError("Evaluation stopped: provider authentication or quota limit; no further calls will be made for this evaluation.")
         if self._interval > 0:
@@ -166,6 +171,12 @@ class _ThrottledChatModel:
         return getattr(self._model, name)
 
 
+def _wrap_evaluator(llm):
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.run_config import RunConfig
+    return LangchainLLMWrapper(_ThrottledChatModel(llm), run_config=RunConfig(timeout=12, max_retries=1, max_wait=0, max_workers=1))
+
+
 def _get_evaluator_llm(endpoint: Optional[str] = None):
     """Return a RAGAS-compatible LLM, reusing the project's LLM factory.
 
@@ -190,7 +201,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 
             llm = create_llm(endpoint=endpoint, temperature=0, timeout=15, max_retries=0)
             logger.info("RAGAS evaluator: using custom endpoint %s", endpoint)
-            return LangchainLLMWrapper(_ThrottledChatModel(llm))
+            return _wrap_evaluator(llm)
 
         from llm_factory import _get_groq_chat, _get_gemini_chat
 
@@ -218,7 +229,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             type(llm).__name__,
             _RAGAS_INTERVAL,
         )
-        return LangchainLLMWrapper(_ThrottledChatModel(llm))
+        return _wrap_evaluator(llm)
     except ValueError as exc:
         logger.warning("RAGAS evaluator: %s", exc)
         raise RuntimeError(
@@ -230,209 +241,97 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 # ─── Score computation ─────────────────────────────────────────────────────
 
 
-def compute_ragas_retrieval_scores(
-    query: str,
-    retrieved_contexts: list[str],
-    ground_truth: Optional[str] = None,
-    answer: Optional[str] = None,
-    endpoint: Optional[str] = None,
-) -> dict[str, float | None]:
-    """Compute RAGAS retrieval & generation quality metrics.
+def _score_one_metric(name, sample, llm, timeout):
+    from ragas import metrics
+    from ragas.run_config import RunConfig
+    classes = {"context_precision": "LLMContextPrecisionWithoutReference", "faithfulness": "Faithfulness", "context_recall": "ContextRecall"}
+    scorer = getattr(metrics, classes[name])(llm=llm)
+    scorer.init(RunConfig(timeout=timeout, max_retries=1, max_wait=0, max_workers=1))
+    return float(scorer.single_turn_score(sample))
 
-    Computes up to five metrics depending on available inputs:
 
-    +---------------------------+------------------------------------------+
-    | Metric                   | Required inputs                          |
-    +===========================+==========================================+
-    | ``context_precision``     | query, retrieved_contexts                |
-    | ``context_recall``        | query, retrieved_contexts, ground_truth  |
-    | ``faithfulness``          | query, retrieved_contexts, answer        |
-    | ``answer_relevancy``      | query, answer                            |
-    | ``mmr`` (Mean Reciprocal  | query, retrieved_contexts                |
-    | Rank)                     | (custom LLM-judged)                      |
-    +---------------------------+------------------------------------------+
+def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=None, endpoint=None, *, metric_timeout=None, progress_callback=None):
+    """Run independent bounded RAGAS metrics, preserving successes and real failures.
 
-    Parameters
-    ----------
-    query : str
-        The search query — in OpenCodeReview this is the PR diff text.
-    retrieved_contexts : list[str]
-        The code/document chunks returned by the retrieval node.
-    ground_truth : str or None
-        Ground-truth reference text (e.g. human review comment).  Required
-        for ``context_recall``.
-    answer : str or None
-        The generated answer (e.g. concatenated review findings / verdict).
-        Required for ``faithfulness`` and ``answer_relevancy``.
-    endpoint : str or None
-        Optional name of a configured custom LLM endpoint
-        (``OCR_ENDPOINT_*``) to score with.  ``None`` uses the built-in
-        Groq → Gemini priority.
-
-    Returns
-    -------
-    dict
-        Mapping of metric name → score (0–1 range, higher is better),
-        or ``None`` when that metric's computation failed (e.g. LLM
-        rate limit / error).  Possible keys: ``context_precision``,
-        ``context_recall``, ``faithfulness``, ``answer_relevancy``,
-        ``mmr``.
-
-    Raises
-    ------
-    RuntimeError
-        If RAGAS or a suitable LLM backend is not available.
+    No local embedding model is loaded. Lexical overlap is never substituted for
+    RAGAS. Input caps reduce judge latency and are disclosed in the report.
     """
-    if not _check_ragas():
-        raise RuntimeError(
-            "RAGAS is not installed. Run: pip install ragas litellm"
-        )
-
-    if not retrieved_contexts:
-        logger.warning("No retrieved contexts — RAGAS scores set to 0.0")
-        result: dict[str, float] = {"context_precision": 0.0, "mmr": 0.0}
-        if ground_truth:
-            result["context_recall"] = 0.0
-        if answer:
-            result["faithfulness"] = 0.0
-            result["answer_relevancy"] = 0.0
-        return result
-
-    from ragas.dataset_schema import SingleTurnSample
-
-    llm = _get_evaluator_llm(endpoint=endpoint)
-    scores: dict[str, float | None] = {}
-
-    # ── Context Precision (reference-free) ───────────────────────────
-    # Uses LLMContextPrecisionWithoutReference which needs user_input +
-    # response + retrieved_contexts (no ground-truth reference required).
-    if answer:
-        try:
-            from ragas.metrics import LLMContextPrecisionWithoutReference
-
-            scorer = LLMContextPrecisionWithoutReference(llm=llm)
-            sample = SingleTurnSample(
-                user_input=query,
-                response=answer,
-                retrieved_contexts=retrieved_contexts,
-            )
-            result = scorer.single_turn_score(sample)
-            scores["context_precision"] = round(float(result), 4)
-            logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
-        except Exception as exc:
-            logger.warning("RAGAS context_precision failed: %s", exc)
-            scores["context_precision"] = None
-
-    # ── Context Recall (requires ground_truth) ───────────────────────
+    import math
+    import queue
+    from contextvars import copy_context
+    started = time.monotonic()
+    total_budget = max(1.0, float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30")))
+    per_metric = max(.05, float(metric_timeout or os.getenv("OCR_RAGAS_METRIC_TIMEOUT_SECONDS", "12")))
+    names = ["context_precision", "faithfulness"]
     if ground_truth:
-        try:
-            from ragas.metrics import ContextRecall
-
-            recall_scorer = ContextRecall(llm=llm)
-            recall_sample = SingleTurnSample(
-                user_input=query,
-                retrieved_contexts=retrieved_contexts,
-                reference=ground_truth,
-            )
-            recall_result = recall_scorer.single_turn_score(recall_sample)
-            scores["context_recall"] = round(float(recall_result), 4)
-            logger.info("RAGAS context_recall: %.4f", scores["context_recall"])
-        except Exception as exc:
-            logger.warning("RAGAS context_recall failed: %s", exc)
-            scores["context_recall"] = None
-
-    # ── Faithfulness ─────────────────────────────────────────────────
-    if answer:
-        try:
-            from ragas.metrics import Faithfulness
-
-            faithfulness_scorer = Faithfulness(llm=llm)
-            faithful_sample = SingleTurnSample(
-                user_input=query,
-                response=answer,
-                retrieved_contexts=retrieved_contexts,
-            )
-            faithful_result = faithfulness_scorer.single_turn_score(faithful_sample)
-            scores["faithfulness"] = round(float(faithful_result), 4)
-            logger.info("RAGAS faithfulness: %.4f", scores["faithfulness"])
-        except Exception as exc:
-            logger.warning("RAGAS faithfulness failed: %s", exc)
-            scores["faithfulness"] = None
-
-    # ── Answer Relevancy (ResponseRelevancy) ─────────────────────────
-    if answer:
-        try:
-            from ragas.metrics import ResponseRelevancy
-
-            # ResponseRelevancy also needs an embedding model for cosine
-            # similarity.  We create a lightweight one from the project's
-            # ChromaDB embedding function (ONNX MiniLM, already cached).
-            embeddings = _create_ragas_embeddings()
-            if embeddings is None:
-                raise RuntimeError(
-                    "No embedding model available for ResponseRelevancy — "
-                    "install chromadb"
-                )
-
-            relevancy_scorer = ResponseRelevancy(
-                llm=llm,
-                embeddings=embeddings,
-                strictness=1,  # Groq only supports n=1
-            )
-            relevancy_sample = SingleTurnSample(
-                user_input=query,
-                response=answer,
-            )
-            relevancy_result = relevancy_scorer.single_turn_score(relevancy_sample)
-            scores["answer_relevancy"] = round(float(relevancy_result), 4)
-            logger.info("RAGAS answer_relevancy: %.4f", scores["answer_relevancy"])
-        except Exception as exc:
-            logger.warning("RAGAS answer_relevancy failed: %s", exc)
-            scores["answer_relevancy"] = None
-
-    # ── MMR (Mean Reciprocal Rank) — custom implementation ───────────
+        names.append("context_recall")
+    report = {"scores": {}, "metrics": {}, "evaluation": {"engine": "RAGAS", "local_models": False, "metric_timeout_seconds": per_metric, "input_truncated": len(query) > 6000 or len(answer or "") > 4000 or len(retrieved_contexts) > 2 or any(len(c) > 4000 for c in retrieved_contexts)}}
+    def finish(name, status, value=None, error=None, duration=0):
+        report["metrics"][name] = {"status": status, "value": value, "error": error, "duration_seconds": round(duration, 3)}
+        if value is not None:
+            report["scores"][name] = value
+        if progress_callback:
+            progress_callback(report)
+    for name, reason in [("answer_relevancy", "Requires embeddings; local models are disabled"), ("mmr", "Extra judge calls disabled in hosted evaluation")]:
+        finish(name, "skipped", error=reason)
+    if not ground_truth:
+        finish("context_recall", "skipped", error="No reference answer provided")
+    if not answer or not retrieved_contexts:
+        for name in names:
+            finish(name, "skipped", error="A complete answer and context are required")
+        return report
     try:
-        mmr = _compute_mmr(query, retrieved_contexts, llm)
-        scores["mmr"] = round(mmr, 4)
-        logger.info("RAGAS mmr: %.4f", scores["mmr"])
+        if not _check_ragas():
+            raise RuntimeError("RAGAS is not installed")
+        from ragas.dataset_schema import SingleTurnSample
+        llm = _get_evaluator_llm(endpoint=endpoint)
+        sample = SingleTurnSample(user_input=query[:6000], response=answer[:4000], retrieved_contexts=[c[:4000] for c in retrieved_contexts[:2]], reference=ground_truth[:4000] if ground_truth else None)
     except Exception as exc:
-        logger.warning("RAGAS mmr failed: %s", exc)
-        scores["mmr"] = None
+        for name in names:
+            finish(name, "failed", error=type(exc).__name__)
+        return report
+    pending = {}
+    for name in names:
+        remaining = total_budget - (time.monotonic() - started) - 1
+        if remaining <= 0:
+            finish(name, "timed_out", error="Evaluation setup exhausted deadline")
+            continue
+        deadline = time.monotonic() + min(per_metric, remaining)
+        output = queue.Queue(maxsize=1)
+        def run(metric=name, target=output, limit=min(per_metric, remaining)):
+            metric_started = time.monotonic()
+            token = _metric_deadline.set(metric_started + limit)
+            try:
+                value = _score_one_metric(metric, sample, llm, limit)
+                if not math.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("Invalid metric value")
+                target.put(("completed", round(value, 4), None, time.monotonic() - metric_started))
+            except Exception as exc:
+                target.put(("failed", None, type(exc).__name__, time.monotonic() - metric_started))
+            finally:
+                _metric_deadline.reset(token)
+        threading.Thread(target=copy_context().run, args=(run,), daemon=True).start()
+        pending[name] = (output, deadline)
+    while pending:
+        for name, (output, deadline) in list(pending.items()):
+            try:
+                status, value, error, duration = output.get_nowait()
+            except queue.Empty:
+                if time.monotonic() < deadline:
+                    continue
+                status, value, error, duration = "timed_out", None, "Metric deadline exceeded", per_metric
+            finish(name, status, value, error, duration)
+            del pending[name]
+        if pending:
+            time.sleep(.01)
+    report["evaluation"]["duration_seconds"] = round(time.monotonic() - started, 3)
+    return report
 
-    # ── Context Precision (reference-based, fallback when no answer) ─
-    if "context_precision" not in scores and ground_truth:
-        try:
-            from ragas.metrics import ContextPrecision
 
-            scorer = ContextPrecision(llm=llm)
-            sample = SingleTurnSample(
-                user_input=query,
-                retrieved_contexts=retrieved_contexts,
-                reference=ground_truth,
-            )
-            result = scorer.single_turn_score(sample)
-            scores["context_precision"] = round(float(result), 4)
-            logger.info("RAGAS context_precision: %.4f", scores["context_precision"])
-        except Exception as exc:
-            logger.warning("RAGAS context_precision failed: %s", exc)
-            scores["context_precision"] = None
-
-    # Deterministic fallback: retrieval-only reviews may not have an answer or
-    # reference, and provider-backed judges can fail or rate-limit. Preserve a
-    # truthful numeric signal from lexical query/context coverage instead of
-    # returning an empty score map.
-    if not any(value is not None for value in scores.values()):
-        query_terms = {term.lower() for term in query.split() if len(term) >= 4}
-        overlaps = []
-        for context in retrieved_contexts:
-            context_terms = {term.lower() for term in context.split() if len(term) >= 4}
-            overlaps.append(len(query_terms & context_terms) / max(1, len(query_terms)))
-        coverage = round(sum(overlaps) / max(1, len(overlaps)), 4)
-        first_relevant = next((index for index, value in enumerate(overlaps, 1) if value > 0), None)
-        scores["context_precision"] = coverage
-        scores["mmr"] = round(1 / first_relevant, 4) if first_relevant else 0.0
-        logger.info("RAGAS deterministic fallback: context_precision=%.4f mmr=%.4f", scores["context_precision"], scores["mmr"])
-    return scores
+def compute_ragas_retrieval_scores(query, retrieved_contexts, ground_truth=None, answer=None, endpoint=None):
+    """Compatibility mapping. Failed/skipped metrics remain None, never invented scores."""
+    report = compute_ragas_report(query, retrieved_contexts, ground_truth, answer, endpoint)
+    return {name: metric["value"] for name, metric in report["metrics"].items()}
 
 
 def _create_ragas_embeddings():

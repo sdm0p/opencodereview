@@ -66,6 +66,10 @@ def human_approval_node(state: OpenCodeReviewState) -> dict:
                 "comment": f.comment,
                 "confidence": f.confidence,
                 "suggested_fix": f.suggested_fix,
+                "kind": f.kind,
+                "evidence_status": f.evidence_status,
+                "evidence_excerpt": f.evidence_excerpt,
+                "calibration_note": f.calibration_note,
             }
             for f in findings
         ],

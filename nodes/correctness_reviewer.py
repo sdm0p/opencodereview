@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from llm_factory import create_llm
+from nodes.finding_quality import calibrate_findings
 from nodes.review_runtime import changed_context, invoke_review, stage_result
 from pydantic import BaseModel, Field
 
@@ -166,6 +167,7 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
     result.findings.extend(static_findings)
 
     # --- Log and return findings ---------------------------------------------
+    result.findings = calibrate_findings(result.findings, state)
     if result and result.findings:
         logger.info(
             "Correctness review found %d issue(s)",

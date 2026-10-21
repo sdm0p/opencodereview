@@ -160,7 +160,8 @@ def _finding_body(finding: Finding) -> str:
     return (
         f"{emoji} **{finding.severity.value.upper()}** — "
         f"*{finding.category}*  \n"
-        f"**Confidence:** {finding.confidence:.0%}  \n\n"
+        f"**Model confidence (uncalibrated):** {finding.confidence:.0%}  \n"
+        f"**Evidence:** {finding.evidence_status} — source location checked; behavior not independently reproduced.  \n\n"
         f"{finding.comment}{fix}"
     )
 
@@ -184,7 +185,7 @@ def _verdict_body(verdict_dict: dict) -> str:
     return (
         f"## OpenCodeReview \u2014 {emoji} "
         f"{verdict_dict['recommendation'].upper()}\n\n"
-        f"**Score:** {score}/10  \n"
+        f"**Risk estimate:** {score}/10 (not answer correctness)  \n"
         f"**Summary:** {summary}\n"
     )
 
@@ -215,6 +216,8 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         logger.info("Not approved \u2014 skipping executor")
         return {"posting_result": {"status": "skipped", "reason": "not_approved"}}
 
+    postable_findings = [finding for finding in state.final_findings if finding.evidence_status == "source_grounded"]
+    withheld = len(state.final_findings) - len(postable_findings)
     _POST_ERRORS.clear()
 
     parts = state.repo.split("/")
@@ -235,7 +238,7 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         )
         if state.verdict:
             logger.info("[WOULD POST] Verdict: %s", state.verdict.summary)
-        for f in state.final_findings:
+        for f in postable_findings:
             logger.info(
                 "[WOULD POST] %s:%d\u2013%d %s \u2014 %s",
                 f.file_path, f.line_start, f.line_end,
@@ -256,7 +259,7 @@ def executor_node(state: OpenCodeReviewState) -> dict:
     inline_failed = 0
     fallback_ok = 0
 
-    for f in state.final_findings:
+    for f in postable_findings:
         body = _finding_body(f)
 
         if commit_id:
@@ -293,7 +296,7 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         verdict_body = _verdict_body(state.verdict.model_dump())
         verdict_posted = _post_issue_comment(owner, repo_name, pr_number, verdict_body)
 
-    total = len(state.final_findings)
+    total = len(postable_findings)
     logger.info(
         "Executor: %d/%d inline, %d/%d fallback, verdict %s \u2014 "
         "%s/%s#%d",
@@ -317,8 +320,11 @@ def executor_node(state: OpenCodeReviewState) -> dict:
         status = "partially_posted"
     else:
         status = "post_failed"
+    if withheld and status == "posted":
+        status = "partially_posted"
     return {"posting_result": {
         "status": status,
+        "withheld_unverified": withheld,
         "total_findings": total,
         "inline_posted": inline_ok,
         "fallback_posted": fallback_ok,

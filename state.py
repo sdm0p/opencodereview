@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from operator import add
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,10 @@ class Finding(BaseModel):
     comment: str  # Human-readable explanation
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     suggested_fix: Optional[str] = None
+    kind: Literal["bug", "security_concern", "test_suggestion"] = "bug"
+    evidence_status: Literal["source_grounded", "needs_verification", "outside_diff"] = "needs_verification"
+    evidence_excerpt: str = ""
+    calibration_note: str = ""
 
 
 class Verdict(BaseModel):
@@ -54,6 +58,8 @@ class Verdict(BaseModel):
     critical_count: int = 0
     high_count: int = 0
     recommendation: str  # "approve" | "request_changes" | "block"
+    score_explanation: str = ""
+    score_breakdown: dict = Field(default_factory=dict)
 
 
 # ─── Graph State ─────────────────────────────────────────────────────────────
@@ -83,6 +89,7 @@ class OpenCodeReviewState(BaseModel):
     findings: Annotated[list[Finding], add] = Field(default_factory=list)
 
     review_stages: Annotated[list[dict], add] = Field(default_factory=list)
+    review_coverage: dict = Field(default_factory=dict)
 
     # Aggregated (deduped, noise-filtered) findings: set-once by aggregator
     final_findings: list[Finding] = Field(default_factory=list)

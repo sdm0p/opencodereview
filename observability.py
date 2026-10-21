@@ -295,15 +295,14 @@ def estimate_model_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
-) -> float:
+) -> float | None:
     """Estimate the USD cost of an LLM call by looking up ``MODEL_PRICING``.
 
     Parameters
     ----------
     model : str
-        Model name (e.g. ``"llama-3.3-70b-versatile"`` or
-        ``"gemini-3.1-flash-lite"``).  Unknown models fall back to the
-        pessimistic ``__default__`` rate.
+        Model name. Unknown models return None; free-suffix models have a
+        zero catalog estimate, never a claimed billing charge.
     input_tokens : int
         Number of tokens in the prompt (system + user messages).
     output_tokens : int
@@ -312,9 +311,13 @@ def estimate_model_cost(
     Returns
     -------
     float
-        Estimated cost in USD.
+        Estimated cost in USD, or None when no known price is available.
     """
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING["__default__"])
+    if model.endswith(":free"):
+        return 0.0
+    pricing = MODEL_PRICING.get(model)
+    if pricing is None:
+        return None
     input_cost = (input_tokens / 1_000_000) * pricing["input"]
     output_cost = (output_tokens / 1_000_000) * pricing["output"]
     return round(input_cost + output_cost, 6)
@@ -324,7 +327,7 @@ def estimate_groq_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
-) -> float:
+) -> float | None:
     """Estimate the USD cost of a Groq LLM call (backward-compatible).
 
     Thin wrapper around :func:`estimate_model_cost`.  Kept so existing
@@ -474,7 +477,7 @@ class TokenCostCallback:
 
     @property
     def total_cost(self) -> float:
-        return sum(u.get("cost", 0.0) for u in self.usage)
+        return sum(u.get("cost") or 0.0 for u in self.usage)
 
     @property
     def total_ttft(self) -> float:
@@ -546,12 +549,18 @@ class TokenCostCallback:
             output_tokens = token_usage.get("completion_tokens", 0) or 0
 
             if input_tokens > 0 or output_tokens > 0:
-                cost = estimate_groq_cost(model, input_tokens, output_tokens)
+                reported = token_usage.get("cost", usage.get("cost"))
+                if isinstance(reported, (int, float)) and not isinstance(reported, bool) and reported >= 0:
+                    cost, cost_source = float(reported), "provider_reported"
+                else:
+                    cost = estimate_model_cost(model, input_tokens, output_tokens)
+                    cost_source = "free_model_estimate" if model.endswith(":free") else "estimated" if cost is not None else "unknown"
                 entry: dict[str, Any] = {
                     "model": model,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cost": cost,
+                    "cost_source": cost_source,
                 }
                 if ttft is not None:
                     entry["ttft_seconds"] = ttft
@@ -567,22 +576,27 @@ class TokenCostCallback:
         if run_id:
             self._start_times.pop(str(run_id), None)
 
+    def details(self) -> dict:
+        sources = {item.get("cost_source", "estimated") for item in self.usage}
+        complete = bool(self.usage) and "unknown" not in sources
+        source = next(iter(sources)) if len(sources) == 1 else "mixed" if sources else "unknown"
+        return {"amount": self.total_cost if complete else None, "currency": "USD", "source": source,
+                "complete": complete, "calls": len(self.usage), "input_tokens": self.total_input_tokens,
+                "output_tokens": self.total_output_tokens, "model_response_seconds": round(self.total_ttft, 3)}
+
     def summary(self) -> str:
-        """Return a human-readable cost & TTFT summary."""
-        calls = len(self.usage)
-        if calls == 0:
-            return "Cost: N/A (no LLM calls captured)"
-
-        parts = [
-            f"Cost: {format_cost(self.total_cost)}",
-            f"{calls} LLM call(s)",
-            f"{self.total_input_tokens:,} in / {self.total_output_tokens:,} out tokens",
-        ]
-
+        """Human-readable attribution; estimates never imply a provider charge."""
+        details = self.details()
+        calls = details["calls"]
+        if not calls:
+            return "Usage unavailable (no successful model usage captured)"
+        labels = {"provider_reported": "Provider-reported cost", "free_model_estimate": "Free-model estimate (not billing)",
+                  "estimated": "Estimated cost (not billing)", "mixed": "Mixed measured/estimated cost"}
+        cost = f"{labels.get(details['source'], 'Cost')}: {format_cost(details['amount'])}" if details['complete'] else "Cost unknown (provider did not report a charge; no matching price)"
+        parts = [cost, f"{calls} LLM call(s)", f"{self.total_input_tokens:,} in / {self.total_output_tokens:,} out tokens"]
         avg = self.avg_ttft
         if avg is not None:
-            parts.append(f"TTFT: {self.total_ttft:.1f}s total / {avg:.2f}s avg")
-
+            parts.append(f"Model response time: {avg:.2f}s avg")
         return " · ".join(parts)
 
     def reset(self) -> None:
@@ -620,11 +634,10 @@ def _resolve_langfuse_trace_id(handler: Any) -> Optional[str]:
             pass
 
     try:
-        from langfuse import Langfuse
-
-        tid = Langfuse().get_current_trace_id()
-        if tid:
-            return tid
+        from opentelemetry import trace
+        context = trace.get_current_span().get_span_context()
+        if context.is_valid:
+            return format(context.trace_id, "032x")
     except Exception:
         pass
 
@@ -688,6 +701,9 @@ def log_langfuse_score(
         return
 
     resolved_trace_id = trace_id or _resolve_langfuse_trace_id(handler)
+    if not resolved_trace_id:
+        logger.warning("Score %s was not logged: no captured trace ID", name)
+        return
 
     # Visibility log: lets you confirm the score will land on the right
     # trace (or spot a None that would create an orphaned score).

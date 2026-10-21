@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from llm_factory import create_llm
+from nodes.finding_quality import calibrate_findings, review_coverage
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState, Severity, Verdict
@@ -79,7 +80,8 @@ def _deduplicate(findings: list[Finding]) -> list[Finding]:
     for f in sorted_fs[1:]:
         same_file = f.file_path == current.file_path
         close_lines = abs(f.line_start - current.line_start) <= LINE_TOLERANCE
-        if same_file and close_lines:
+        same_claim = " ".join(f.comment.lower().split()) == " ".join(current.comment.lower().split())
+        if same_file and close_lines and f.kind == current.kind and f.category == current.category and same_claim:
             # Keep the higher-confidence finding, merge comments
             if f.confidence > current.confidence:
                 current = f
@@ -123,8 +125,11 @@ def _more_severe(a: Severity, b: Severity) -> Severity:
 
 def _rule_verdict(findings: list[Finding]) -> Verdict:
     """Build a verdict from deduplicated findings without an LLM call."""
+    eligible = [f for f in findings if f.kind != "test_suggestion" and f.evidence_status == "source_grounded"]
+    suggestions = sum(f.kind == "test_suggestion" for f in findings)
+    unverified = sum(f.kind != "test_suggestion" and f.evidence_status != "source_grounded" for f in findings)
     counts = {s: 0 for s in Severity}
-    for f in findings:
+    for f in eligible:
         counts[f.severity] = counts.get(f.severity, 0) + 1
 
     critical = counts[Severity.CRITICAL]
@@ -136,7 +141,7 @@ def _rule_verdict(findings: list[Finding]) -> Verdict:
     elif high > 0:
         recommendation = "request_changes"
         approved = False
-    elif len(findings) > 0:
+    elif eligible or suggestions or unverified:
         recommendation = "comment"
         approved = True
     else:
@@ -149,19 +154,23 @@ def _rule_verdict(findings: list[Finding]) -> Verdict:
     severity_counts = {s.value: counts.get(s, 0) for s in Severity}
 
     return Verdict(
-        summary=_rule_summary(recommendation, severity_counts),
+        summary=_rule_summary(recommendation, severity_counts) + (f" {suggestions} test suggestion(s), {unverified} unverified claim(s) are excluded from the score." if suggestions or unverified else ""),
         approved=approved,
         overall_score=round(score, 1),
         critical_count=critical,
         high_count=high,
         recommendation=recommendation,
+        score_explanation="Risk estimate from source-grounded findings, not answer correctness or proof of safety. Test suggestions and claims without source grounding do not lower the score.",
+        score_breakdown={"starting_score": 10, "critical_penalty": critical * 4, "high_penalty": high * 2,
+                         "medium_penalty": counts[Severity.MEDIUM] * .5, "scored_findings": len(eligible),
+                         "test_suggestions_excluded": suggestions, "unverified_claims_excluded": unverified},
     )
 
 
 def _rule_summary(recommendation: str, counts: dict) -> str:
     parts = [f"{v} {k}" for k, v in counts.items() if v > 0]
     if not parts:
-        return "No issues found — PR looks clean."
+        return "No source-grounded defects detected. This does not establish that the PR is safe."
     body = ", ".join(parts)
     if recommendation == "block":
         return f"Blocking: {body} — critical issues must be resolved."
@@ -214,25 +223,20 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
       2. Rule-based verdict by default (fast, ~10ms), or optional LLM critic
          when ``USE_LLM_CRITIC`` is enabled.
     """
+    coverage = review_coverage(state)
+    calibrated = calibrate_findings(state.findings, state)
     failed = [stage for stage in state.review_stages if stage.get("status") == "failed"]
     if failed:
         names = ", ".join(stage["reviewer"] for stage in failed)
-        return {"final_findings": _deduplicate(state.findings), "verdict": Verdict(
+        return {"review_coverage": coverage, "final_findings": _deduplicate(calibrated), "verdict": Verdict(
             summary=f"Review incomplete: {names} failed. Findings are partial; no approval or quality score is available.",
             approved=False, overall_score=None, recommendation="incomplete",
+            score_explanation="No overall risk score is available because one or more reviewers failed. Remaining findings are partial.",
         )}
-    raw_findings = state.findings
+    raw_findings = calibrated
     if not raw_findings:
         logger.info("No findings to aggregate — producing empty verdict")
-        empty_verdict = Verdict(
-            summary="No issues found — PR looks clean.",
-            approved=True,
-            overall_score=10.0,
-            critical_count=0,
-            high_count=0,
-            recommendation="approve",
-        )
-        return {"final_findings": [], "verdict": empty_verdict}
+        return {"review_coverage": coverage, "final_findings": [], "verdict": _rule_verdict([])}
 
     # -- Phase 1: Heuristic dedup --------------------------------------------
     deduped = _deduplicate(raw_findings)
@@ -266,14 +270,14 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
                 result = None
 
             if result is not None:
-                final_findings = result.findings
-                verdict = result.verdict
+                final_findings = calibrate_findings(result.findings, state)
+                verdict = _rule_verdict(final_findings)
                 logger.info(
                     "LLM aggregator: %d deduped → %d final, recommendation=%s",
                     len(deduped), len(final_findings),
                     verdict.recommendation,
                 )
-                return {"final_findings": final_findings, "verdict": verdict}
+                return {"review_coverage": coverage, "final_findings": final_findings, "verdict": verdict}
 
     # Rule-based path (default) — zero LLM overhead
     logger.info("Using rule-based aggregation (fast path)")
@@ -281,6 +285,7 @@ def aggregator_node(state: OpenCodeReviewState) -> dict:
     verdict = _rule_verdict(deduped)
 
     return {
+        "review_coverage": coverage,
         "final_findings": final_findings,  # plain list, overwrites
         "verdict": verdict,                # set-once, no reducer needed
     }

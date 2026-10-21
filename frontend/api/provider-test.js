@@ -21,6 +21,10 @@ export default async function handler(req, res) {
       url = `${base.origin}${base.pathname.replace(/\/$/,'')}/chat/completions`;
       headers = {Authorization:`Bearer ${apiKey}`};
       body = {model,max_tokens:256,messages:[{role:'user',content:prompt}]};
+      if (base.hostname === 'openrouter.ai' && model.toLowerCase().includes('minimax-m3.1')) {
+        body.max_tokens = 8192;
+        body.reasoning = {effort:'low'};
+      }
     }
     const response = await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});
     const data = await response.json();

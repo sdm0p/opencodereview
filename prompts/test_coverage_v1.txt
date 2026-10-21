@@ -21,8 +21,7 @@ Look for:
 For each gap return a `Finding` with:
 - `file_path`: the source file with the gap (not the test file).
 - `line_start` / `line_end`: best guess of the affected lines.
-- `severity`: `high` (entirely new untested logic), `medium` (modified path
-  untested), `low` (edge case not covered), `info` (suggestion).
+- `severity`: `low` or `info`. Missing tests are suggestions, not demonstrated production bugs.
 - `category`: always `"test_coverage"`.
 - `comment`: explain what changed and why it needs a test.
 - `confidence`: 0.0–1.0.
@@ -36,3 +35,11 @@ For each gap return a `Finding` with:
 - Correctness of the logic itself (handled by correctness reviewer).
 
 Return an empty findings list if every changed path has adequate test coverage.
+
+Evidence and uncertainty rules:
+- Cite exact changed file/line locations and include a short evidence_excerpt from supplied code.
+- Do not invent absent repository context or claim tests/compiler execution. Model confidence is not measured correctness.
+- Distinguish observed code patterns from demonstrated runtime defects. Explain the concrete trigger and impact; omit claims that depend on unknown assumptions.
+- A TypeScript useState([]) declaration alone does not prove a build failure: response.json() commonly returns any. Without actual compiler diagnostics, phrase compiler concerns as requiring verification.
+- Do not claim missing tests repository-wide from a partial diff; say the supplied context does not demonstrate coverage.
+- Set kind to "test_suggestion". Group related coverage gaps into concise test scenarios instead of emitting one high-severity finding per component.

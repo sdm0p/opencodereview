@@ -89,7 +89,7 @@ def _init_jobs() -> None:
 _init_jobs()
 
 def _save_job(job: dict[str, Any]) -> None:
-    payload = {k: v for k, v in job.items() if k not in {"future"}}
+    payload = {k: v for k, v in job.items() if k not in {"future", "ragas_inputs"}}
     if "config" in payload:
         payload["config"] = {"configurable": payload["config"].get("configurable", {})}
     pg = _postgres_connect()
@@ -148,6 +148,11 @@ class ReviewRequest(BaseModel):
 
 class DecisionRequest(BaseModel):
     action: Literal["approve", "reject"]
+
+
+class FindingFeedbackRequest(BaseModel):
+    finding_index: int = Field(ge=0)
+    label: Literal['correct', 'incorrect', 'useful']
 
 
 def _authorize(token: str | None) -> None:
@@ -220,7 +225,7 @@ def github_logout(request: Request) -> dict[str, str]:
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in job.items() if key not in {"config", "future", "request_fingerprint", "owner_id"}}
+    result = {key: value for key, value in job.items() if key not in {"config", "future", "request_fingerprint", "owner_id", "ragas_inputs"}}
     now = time.time()
     result["elapsed_seconds"] = round(max(0, now - job.get("started_timestamp", now)), 1) if job.get("status") in {"processing", "queued"} else job.get("elapsed_seconds", 0)
     if job.get("status") == "queued":
@@ -230,6 +235,21 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
 def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
     result = _public_job(job)
     task_id = result.get("ragas_task_id")
+    with _ragas_lock:
+        task = _ragas_tasks.get(task_id) if task_id else None
+    def finish():
+        metrics = (task or {}).get('metrics') or job.get('ragas_metrics') or {}
+        evaluation = (task or {}).get('evaluation') or job.get('ragas_evaluation') or {}
+        result.setdefault('ragas', {}).update(metrics=metrics, evaluation=evaluation)
+        if metrics and result['ragas'].get('scores') and any(m.get('status') != 'completed' for m in metrics.values()):
+            result['ragas']['status'] = 'partial'
+        if metrics != job.get('ragas_metrics', {}) or evaluation != job.get('ragas_evaluation', {}):
+            with _lock:
+                live = _jobs.get(job.get('id'))
+                if live is not None:
+                    live.update(ragas_metrics=metrics, ragas_evaluation=evaluation)
+                    _save_job(live)
+        return result
     if not task_id:
         result["ragas"] = {
             "status": "skipped",
@@ -243,7 +263,7 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
                 "scores": job.get("ragas_scores") or {},
                 "error": job.get("ragas_error"),
             }
-            return result
+            return finish()
         with _ragas_lock:
             task = _ragas_tasks.get(task_id)
         if not task:
@@ -260,7 +280,7 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
                         live["ragas_error"] = result["ragas"]["error"]
                         _save_job(live)
         elif not task.get("done"):
-            timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
+            timeout = float(task.get("timeout_seconds") or os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
             started = float(task.get("started", 0) or 0)
             if started and datetime.now(timezone.utc).timestamp() - started > timeout:
                 result["ragas"] = {"status": "failed", "error": f"RAGAS exceeded {int(timeout)} second timeout"}
@@ -299,7 +319,7 @@ def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
                         live["ragas_status"] = "completed_no_scores"
                         live["ragas_error"] = result["ragas"]["error"]
                         _save_job(live)
-    return result
+    return finish()
 
 
 def _run_job(job_id: str, request: ReviewRequest) -> None:
@@ -373,7 +393,7 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
                 _jobs[job_id]["head_sha"] = actual_head
             stages = state.values.get("review_stages", [])
             incomplete = bool(verdict and verdict.recommendation == "incomplete")
-            _jobs[job_id].update(review_stages=stages, elapsed_seconds=round(time.time() - _jobs[job_id]["started_timestamp"], 2), status="incomplete" if incomplete else "awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None, ragas_inputs=ragas_inputs or None)
+            _jobs[job_id].update(review_coverage=state.values.get("review_coverage", {}), review_stages=stages, elapsed_seconds=round(time.time() - _jobs[job_id]["started_timestamp"], 2), status="incomplete" if incomplete else "awaiting_approval", config=config, verdict=verdict.model_dump(mode="json") if verdict else None, findings=[item.model_dump(mode="json") for item in findings], cost=cost, cost_details=config.get("metadata", {}).get("cost_details"), ragas_task_id=ragas if isinstance(ragas, str) else None, ragas_scores=ragas if isinstance(ragas, dict) else None, ragas_inputs=None)
             _save_job(_jobs[job_id])
     except Exception as exc:
         with _lock:
@@ -388,6 +408,11 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
 def _hydrate_jobs() -> None:
     """Restore persisted jobs after a process restart and resume interrupted work."""
     for persisted in _load_jobs():
+        # Evaluation inputs may include an in-memory endpoint object. Never
+        # retain or expose that snapshot: it can contain a user's provider key.
+        if "ragas_inputs" in persisted:
+            persisted.pop("ragas_inputs", None)
+            _save_job(persisted)
         job_id = persisted.get("id")
         if not job_id:
             continue
@@ -520,6 +545,29 @@ def get_review(job_id: str, request: Request, x_api_key: str | None = Header(def
     if not job or job.get("owner_id", "api-key") != owner:
         raise HTTPException(status_code=404, detail="Review not found")
     return _with_ragas(job)
+
+
+@app.post('/api/reviews/{job_id}/feedback')
+def finding_feedback(job_id: str, payload: FindingFeedbackRequest, request: Request,
+                     x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
+    _authorize_request(x_api_key, request)
+    _rate_limit(request)
+    owner = str((_session(request) or {}).get('github_id') or 'api-key')
+    with _lock:
+        job = _jobs.get(job_id) or _load_job(job_id)
+        if not job or job.get('owner_id', 'api-key') != owner:
+            raise HTTPException(status_code=404, detail='Review not found')
+        if job.get('status') not in {'awaiting_approval', 'incomplete', 'posted', 'partially_posted', 'rejected', 'post_failed'}:
+            raise HTTPException(status_code=409, detail='Wait until the review finishes before giving feedback')
+        if payload.finding_index >= len(job.get('findings') or []):
+            raise HTTPException(status_code=422, detail='Finding does not exist')
+        feedback = dict(job.get('feedback') or {})
+        feedback[str(payload.finding_index)] = payload.label
+        job['feedback'] = feedback
+        job['feedback_updated_at'] = datetime.now(timezone.utc).isoformat()
+        _jobs[job_id] = job
+        _save_job(job)
+    return {'feedback': feedback}
 
 
 @app.post("/api/reviews/{job_id}/decision")

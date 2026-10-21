@@ -25,14 +25,34 @@ def test_incomplete_review_never_starts_ragas():
     assert ns['_ragas_inputs_from_state'](state, 'custom') is None
 
 
+def test_feedback_is_persisted_for_existing_finding_only():
+    ns = scheduler()
+    ns['_jobs']['job'] = {'id': 'job', 'owner_id': '1', 'status': 'awaiting_approval', 'findings': [{'comment': 'evidence'}]}
+    vote = SimpleNamespace(finding_index=0, label='incorrect')
+    assert ns['finding_feedback']('job', vote, SimpleNamespace(owner=1)) == {'feedback': {'0': 'incorrect'}}
+    ns['_save_job'].assert_called_once()
+    with pytest.raises(HTTPException) as absent:
+        ns['finding_feedback']('job', SimpleNamespace(finding_index=1, label='correct'), SimpleNamespace(owner=1))
+    assert absent.value.status_code == 422
+    with pytest.raises(HTTPException) as foreign:
+        ns['finding_feedback']('job', vote, SimpleNamespace(owner=2))
+    assert foreign.value.status_code == 404
+
+
+def test_public_job_never_exposes_evaluator_endpoint_snapshot():
+    ns = scheduler()
+    job = {'id': 'job', 'status': 'incomplete', 'ragas_inputs': {'endpoint': {'api_key': 'private'}}, 'config': {}}
+    assert 'ragas_inputs' not in ns['_public_job'](job)
+
+
 def scheduler():
     tree = ast.parse(Path('api.py').read_text(encoding='utf-8'))
-    names = {'create_review', 'cancel_review', '_public_job', 'get_review', 'decide_review'}
+    names = {'create_review', 'cancel_review', '_public_job', 'get_review', 'decide_review', 'finding_feedback'}
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     for node in nodes:
         node.decorator_list = []
     ns = dict(__file__=str(Path('api.py').resolve()), Path=Path, Any=Any, Request=object, ReviewRequest=object,
-              Header=lambda *a, **k: None, DecisionRequest=object, HTTPException=HTTPException, hashlib=hashlib, json=json,
+              Header=lambda *a, **k: None, DecisionRequest=object, FindingFeedbackRequest=object, HTTPException=HTTPException, hashlib=hashlib, json=json,
               threading=threading, time=time, uuid=uuid, datetime=datetime, timezone=timezone,
               os=SimpleNamespace(getenv=lambda *a: ''), requests=SimpleNamespace(get=Mock()),
               _jobs={}, _lock=threading.Lock(), _save_job=Mock(), _executor=SimpleNamespace(submit=Mock()),

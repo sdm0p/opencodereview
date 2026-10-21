@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from llm_factory import create_llm
+from nodes.finding_quality import calibrate_findings
 from nodes.review_runtime import changed_context, invoke_review, stage_result
 from pydantic import BaseModel, Field
 
@@ -131,6 +132,7 @@ def test_coverage_reviewer_node(state: OpenCodeReviewState) -> dict:
         logger.warning("Test-coverage review LLM call failed: %s", exc)
         return {"review_stages": [stage_result("test_coverage", started, error=exc, llm=locals().get("llm"))]}
 
+    result.findings = calibrate_findings(result.findings, state)
     if result.findings:
         logger.info("Test-coverage review found %d issue(s)", len(result.findings))
         for f in result.findings:

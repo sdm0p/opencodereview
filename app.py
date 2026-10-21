@@ -12,6 +12,7 @@ On Hugging Face Spaces:
 from __future__ import annotations
 
 import html
+from contextvars import copy_context
 import json
 import ipaddress
 import logging
@@ -248,6 +249,7 @@ def _build_and_stream(
         conn.close()
     flush_langfuse()
 
+    config.setdefault("metadata", {})["cost_details"] = cost_tracker.details()
     return state, config, cost_tracker.summary(), ragas_out, ({**ragas_inputs, "endpoint": None} if ragas_inputs else None)
 
 
@@ -477,6 +479,7 @@ def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
     answer_text = "\n".join(answer_lines) if answer_lines else None
     return {
         "query": query,
+        "context_source": "retrieved_context" if context_chunks else "pr_diff_proxy",
         "contexts": contexts,
         "answer": answer_text,
         "endpoint": __import__("endpoints").get_endpoint(endpoint_name) if endpoint_name else None,
@@ -489,18 +492,23 @@ def _compute_and_log_ragas(
     pr_number: int,
     run_trace_id: str | None,
     handler,
+    progress_callback=None,
 ) -> dict[str, float | None]:
     """Compute RAGAS scores and log them to Langfuse. Never raises."""
     scores: dict[str, float | None] = {}
     try:
-        from eval_data.ragas_eval import compute_ragas_retrieval_scores
+        from eval_data.ragas_eval import compute_ragas_report
 
-        scores = compute_ragas_retrieval_scores(
+        report = compute_ragas_report(
             query=inputs["query"],
             retrieved_contexts=inputs["contexts"],
             answer=inputs["answer"],
             endpoint=inputs["endpoint"],
+            progress_callback=progress_callback,
         )
+        scores = report["scores"]
+        if progress_callback:
+            progress_callback(report)
         for metric_name, value in scores.items():
             if value is None:
                 continue
@@ -534,30 +542,42 @@ def _ragas_worker(
     result_callback=None,
 ) -> None:
     """Daemon thread body: compute scores, stash them for the Timer poll."""
-    timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
+    timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30"))
+    def report_progress(report):
+        with _ragas_lock:
+            entry = _ragas_tasks.get(task_id)
+            if entry is not None:
+                entry["metrics"] = dict(report.get("metrics", {}))
+                entry["evaluation"] = {**report.get("evaluation", {}), "context_source": inputs.get("context_source", "retrieved_context")}
+                entry["scores"] = dict(report.get("scores", {}))
+    with _ragas_lock:
+        if task_id in _ragas_tasks:
+            _ragas_tasks[task_id]["timeout_seconds"] = timeout
     try:
         # The provider call may block on a network timeout. Keep the task
         # terminal and observable even when the provider does not return.
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ragas-call")
         future = pool.submit(
+            copy_context().run,
             _compute_and_log_ragas,
             inputs,
             repo,
             pr_number,
             run_trace_id,
             handler,
+            report_progress,
         )
         try:
             scores = future.result(timeout=timeout)
         except FutureTimeoutError:
-            scores = {}
             with _ragas_lock:
                 entry = _ragas_tasks.get(task_id)
+                scores = dict((entry or {}).get("scores") or {})
                 if entry is not None:
                     entry["error"] = f"RAGAS exceeded {int(timeout)} second timeout"
                     entry["done"] = True
             if result_callback:
-                result_callback({}, f"RAGAS exceeded {int(timeout)} second timeout")
+                result_callback(scores, f"RAGAS exceeded {int(timeout)} second timeout")
             pool.shutdown(wait=False, cancel_futures=True)
             return
         else:
@@ -603,8 +623,8 @@ def _spawn_ragas_background(
                 if len(_ragas_tasks) <= 64:
                     break
     threading.Thread(
-        target=_ragas_worker,
-        args=(task_id, inputs, repo, pr_number, run_trace_id, handler, result_callback),
+        target=copy_context().run,
+        args=(_ragas_worker, task_id, inputs, repo, pr_number, run_trace_id, handler, result_callback),
         name=f"ragas-{task_id}",
         daemon=True,
     ).start()
