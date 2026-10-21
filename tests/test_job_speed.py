@@ -1,5 +1,6 @@
 """Exercise API scheduling without importing the heavyweight model runtime."""
 import ast
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -103,7 +104,7 @@ def test_cancellation_is_owner_scoped_and_terminal():
 def test_evaluation_quota_stops_followup_calls():
     tree = ast.parse(Path('eval_data/ragas_eval.py').read_text(encoding='utf-8'))
     node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == '_ThrottledChatModel')
-    ns = {'_RAGAS_INTERVAL': 0, '_ragas_throttle_lock': threading.Lock(), 'time': time}
+    ns = {'_RAGAS_INTERVAL': 0, '_ragas_throttle_lock': threading.Lock(), 'time': time, '_metric_deadline': ContextVar('test_deadline', default=None)}
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'ragas_eval.py', 'exec'), ns)
     model = Mock()
     quota = RuntimeError('rate_limit_exceeded')

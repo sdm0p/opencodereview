@@ -22,3 +22,5 @@ python -m eval_data.offline_regression --predictions review.json --fixture eval_
 The curated initial fixture is partial. Location/category/concept matches are evaluation proxies, not proof that a finding is correct. No local models are loaded.
 
 Validation: backend and frontend regression tests plus the production frontend build. Live verification is reported separately; no improvement percentages are claimed without a controlled benchmark.
+
+Live verification (2026-10-21): Vercel UI and HF backend; calcom/cal.diy PR #10600 with the saved MiniMax free endpoint in Fast mode completed in 40 seconds. All three reviewers completed. Results grouped 9 test suggestions separately from 3 low-severity findings; score breakdown excluded the suggestions. Feedback saved successfully. Provider connection test returned valid JSON in 1.2 seconds; default selection survived refresh. RAGAS context precision completed (1.000, using a truncated PR-diff proxy); faithfulness returned a provider connection error and the UI reported partial evaluation. This run is workflow evidence, not proof of finding correctness or retrieval accuracy.

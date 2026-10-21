@@ -44,6 +44,30 @@ def test_no_context_is_not_a_zero_quality_measurement():
     assert all(metric["status"] == "skipped" for metric in report["metrics"].values())
 
 
+def test_parallel_metrics_have_independent_evaluators(monkeypatch):
+    prepare(monkeypatch)
+    evaluators = []
+    def factory(endpoint):
+        evaluator = object()
+        evaluators.append(evaluator)
+        return evaluator
+    monkeypatch.setattr(ragas_eval, "_get_evaluator_llm", factory)
+    monkeypatch.setattr(ragas_eval, "_score_one_metric", lambda *args: .5)
+    report = ragas_eval.compute_ragas_report("query", ["context"], answer="answer")
+    assert len(evaluators) == 2
+    assert evaluators[0] is not evaluators[1]
+    assert len(report["scores"]) == 2
+
+
+def test_metric_errors_are_actionable_without_provider_secrets():
+    connection_error = type("OpenAIConnectionError", (Exception,), {})
+    status, error = ragas_eval._safe_metric_error(connection_error("secret-api-key"))
+    assert status == "failed"
+    assert "connection failed" in error
+    assert "secret-api-key" not in error
+    assert ragas_eval._safe_metric_error(TimeoutError())[0] == "timed_out"
+
+
 def test_cost_free_estimate_is_distinct_from_provider_report():
     callback = TokenCostCallback()
     callback.on_llm_end(SimpleNamespace(llm_output={"model_name": "minimax/test:free", "token_usage": {"prompt_tokens": 1000, "completion_tokens": 2000}}))

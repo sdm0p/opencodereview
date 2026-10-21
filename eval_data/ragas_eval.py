@@ -198,9 +198,16 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
     try:
         if endpoint:
             from llm_factory import create_llm
-
-            llm = create_llm(endpoint=endpoint, temperature=0, timeout=15, max_retries=0)
-            logger.info("RAGAS evaluator: using custom endpoint %s", endpoint)
+            from endpoints import EndpointConfig, get_endpoint
+            configured = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
+            timeout = 15
+            if configured and not getattr(configured, "builtin", False) and configured.provider not in {"google", "anthropic"}:
+                import httpx
+                # LangChain caches HTTP clients for hashable timeout values.
+                # An unhashable Timeout forces a private pool for this loop.
+                timeout = httpx.Timeout(15)
+            llm = create_llm(endpoint=endpoint, temperature=0, timeout=timeout, max_retries=0)
+            logger.info("RAGAS evaluator: using selected custom endpoint")
             return _wrap_evaluator(llm)
 
         from llm_factory import _get_groq_chat, _get_gemini_chat
@@ -250,6 +257,25 @@ def _score_one_metric(name, sample, llm, timeout):
     return float(scorer.single_turn_score(sample))
 
 
+def _safe_metric_error(exc):
+    """Classify failures without exposing provider responses or credentials."""
+    chain = []
+    current = exc
+    while current is not None and len(chain) < 5:
+        chain.append(type(current).__name__.lower())
+        current = current.__cause__ or current.__context__
+    kinds = " ".join(chain)
+    if "timeout" in kinds:
+        return "timed_out", "Evaluator provider timed out. Retry or select a faster model."
+    if "connection" in kinds or "connecterror" in kinds:
+        return "failed", "Evaluator provider connection failed. Retry; check provider availability if it persists."
+    if "ratelimit" in kinds:
+        return "failed", "Evaluator provider rate limit reached. Wait or select another saved provider."
+    if "authentication" in kinds or "permission" in kinds:
+        return "failed", "Evaluator provider rejected access. Check the saved provider credentials and permissions."
+    return "failed", type(exc).__name__
+
+
 def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=None, endpoint=None, *, metric_timeout=None, progress_callback=None):
     """Run independent bounded RAGAS metrics, preserving successes and real failures.
 
@@ -284,7 +310,6 @@ def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=No
         if not _check_ragas():
             raise RuntimeError("RAGAS is not installed")
         from ragas.dataset_schema import SingleTurnSample
-        llm = _get_evaluator_llm(endpoint=endpoint)
         sample = SingleTurnSample(user_input=query[:6000], response=answer[:4000], retrieved_contexts=[c[:4000] for c in retrieved_contexts[:2]], reference=ground_truth[:4000] if ground_truth else None)
     except Exception as exc:
         for name in names:
@@ -302,12 +327,17 @@ def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=No
             metric_started = time.monotonic()
             token = _metric_deadline.set(metric_started + limit)
             try:
+                # Each metric runs its own asyncio loop. Sharing an async HTTP
+                # client across these threads can bind its pool to another loop.
+                llm = _get_evaluator_llm(endpoint=endpoint)
                 value = _score_one_metric(metric, sample, llm, limit)
                 if not math.isfinite(value) or not 0 <= value <= 1:
                     raise ValueError("Invalid metric value")
                 target.put(("completed", round(value, 4), None, time.monotonic() - metric_started))
             except Exception as exc:
-                target.put(("failed", None, type(exc).__name__, time.monotonic() - metric_started))
+                status, error = _safe_metric_error(exc)
+                logger.warning("RAGAS metric %s failed (%s)", metric, type(exc).__name__)
+                target.put((status, None, error, time.monotonic() - metric_started))
             finally:
                 _metric_deadline.reset(token)
         threading.Thread(target=copy_context().run, args=(run,), daemon=True).start()
