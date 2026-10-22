@@ -17,7 +17,9 @@ export default async function handler(req, res) {
       body = {model,max_tokens:256,messages:[{role:'user',content:prompt}]};
     } else {
       const base = new URL(baseUrl || 'https://api.openai.com/v1');
-      if (base.protocol !== 'https:' || !['openrouter.ai','api.openai.com','api.groq.com','api.deepseek.com','tokenharbor.ai'].includes(base.hostname) || base.port || base.username || base.password) return res.status(400).json({error:'Use an HTTPS API URL from OpenRouter, OpenAI, Groq, DeepSeek, or TokenHarbor.'});
+      const allowedHost = ['openrouter.ai','api.openai.com','api.groq.com','api.deepseek.com','tokenharbor.ai'].includes(base.hostname)
+        || base.hostname === 'trycloudflare.com' || base.hostname.endsWith('.trycloudflare.com');
+      if (base.protocol !== 'https:' || !allowedHost || base.port || base.username || base.password) return res.status(400).json({error:'Use an HTTPS API URL from OpenRouter, OpenAI, Groq, DeepSeek, TokenHarbor, or a Cloudflare trycloudflare.com tunnel.'});
       url = `${base.origin}${base.pathname.replace(/\/$/,'')}/chat/completions`;
       headers = {Authorization:`Bearer ${apiKey}`};
       body = {model,max_tokens:256,messages:[{role:'user',content:prompt}]};

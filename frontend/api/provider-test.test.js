@@ -60,3 +60,16 @@ test('TokenHarbor OpenAI-compatible URL is allowed', async () => {
     await handler(req,res); assert.equal(res.code,200); assert.equal(res.body.json_object_valid,true);
   } finally { globalThis.fetch = original; }
 });
+
+test('Cloudflare temporary HTTPS tunnel is allowed for testing', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url) => {
+      assert.equal(url, 'https://mapping-relates-mediterranean-cosmetic.trycloudflare.com/v1/chat/completions');
+      return {ok:true,json:async()=>({choices:[{message:{content:'{"findings":[]}'}}]})};
+    };
+    const req = request(), res = response();
+    req.body.baseUrl='https://mapping-relates-mediterranean-cosmetic.trycloudflare.com/v1';
+    await handler(req,res); assert.equal(res.code,200); assert.equal(res.body.json_object_valid,true);
+  } finally { globalThis.fetch=original; }
+});
