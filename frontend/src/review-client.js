@@ -38,7 +38,8 @@ export function upsertProvider(entries, item, previousName = null) {
 }
 
 export function reviewPayload(repo, pr, endpoint, savedProviders, reviewMode, baselineSha = "") {
-  const payload = { repo: repo.trim(), pr_number: Number(pr), endpoint, review_mode: reviewMode };
+  const builtinEndpoint = {gemini: 'Gemini', groq: 'Grok'}[endpoint] || endpoint;
+  const payload = { repo: repo.trim(), pr_number: Number(pr), endpoint: builtinEndpoint, review_mode: reviewMode };
   if (baselineSha.trim()) {
     if (!/^[a-fA-F0-9]{40}$/.test(baselineSha.trim())) throw new Error("Enter the full 40-character baseline commit SHA.");
     payload.baseline_sha = baselineSha.trim().toLowerCase();

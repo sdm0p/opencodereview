@@ -212,6 +212,10 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
     if endpoint:
         from endpoints import EndpointConfig, get_endpoint
 
+        # The browser historically sent lowercase builtin ids while the
+        # endpoint registry uses display names. Accept both for API clients.
+        if isinstance(endpoint, str):
+            endpoint = {"gemini": "Gemini", "groq": "Grok"}.get(endpoint.lower(), endpoint)
         ep = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
         if ep is not None:
             if getattr(ep, "builtin", False):

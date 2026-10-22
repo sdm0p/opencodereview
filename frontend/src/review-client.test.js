@@ -9,7 +9,8 @@ test('saved model supplies its own credentials even when provider draft differs'
 });
 
 test('built-in selection does not accidentally send custom credentials', () => {
-  assert.deepEqual(reviewPayload('owner/repo', 1, 'groq', [], 'thorough'), {repo:'owner/repo',pr_number:1,endpoint:'groq',review_mode:'thorough'});
+  assert.deepEqual(reviewPayload('owner/repo', 1, 'groq', [], 'thorough'), {repo:'owner/repo',pr_number:1,endpoint:'Grok',review_mode:'thorough'});
+  assert.equal(reviewPayload('owner/repo', 1, 'gemini', [], 'thorough').endpoint, 'Gemini');
 });
 
 test('missing saved selection fails rather than falling back to operator keys', () => {
