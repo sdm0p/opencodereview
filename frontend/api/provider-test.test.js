@@ -54,7 +54,7 @@ test('TokenHarbor OpenAI-compatible URL is allowed', async () => {
   try {
     globalThis.fetch = async (url) => {
       assert.equal(url, 'https://tokenharbor.ai/v1/chat/completions');
-      return {ok:true,json:async()=>({choices:[{message:{content:'{"ok":true}'}}]})};
+      return {ok:true,json:async()=>({choices:[{message:{content:'{"findings":[]}'}}]})};
     };
     const req = request(), res = response(); req.body.baseUrl='https://tokenharbor.ai/v1';
     await handler(req,res); assert.equal(res.code,200); assert.equal(res.body.json_object_valid,true);
