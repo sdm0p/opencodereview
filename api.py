@@ -331,6 +331,7 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             _save_job(_jobs[job_id])
     try:
         ephemeral_endpoint = None
+        ragas_started = False
         endpoint_name = _normalize_endpoint_name(request.endpoint)
         if request.api_key:
             if not request.provider or not request.model:
@@ -339,14 +340,21 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             register_endpoint(ephemeral_endpoint, request.provider, request.api_key, request.base_url, request.model)
             endpoint_name = ephemeral_endpoint
         def save_ragas(scores: dict, error: str | None) -> None:
-            with _lock:
-                live = _jobs.get(job_id)
-                if live is None:
-                    return
-                live["ragas_scores"] = scores or None
-                live["ragas_status"] = "failed" if error else ("completed" if scores else "completed_no_scores")
-                live["ragas_error"] = error
-                _save_job(live)
+            try:
+                with _lock:
+                    live = _jobs.get(job_id)
+                    if live is None:
+                        return
+                    live["ragas_scores"] = scores or None
+                    live["ragas_status"] = "failed" if error else ("completed" if scores else "completed_no_scores")
+                    live["ragas_error"] = error
+                    _save_job(live)
+            finally:
+                # Custom providers are registered only for this job. Keep the
+                # endpoint alive until the background RAGAS task has finished;
+                # otherwise evaluation silently falls back to built-ins.
+                if ephemeral_endpoint:
+                    unregister_endpoint(ephemeral_endpoint)
 
         def progress(stage: str, elapsed: float, update: dict | None = None) -> None:
             with _lock:
@@ -380,6 +388,7 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
             review_mode=request.review_mode,
             baseline_sha=request.baseline_sha,
         )
+        ragas_started = isinstance(ragas, str)
         actual_head = state.values.get("head_sha")
         verdict: Verdict | None = state.values.get("verdict")
         findings: list[Finding] = state.values.get("final_findings", [])
@@ -401,7 +410,7 @@ def _run_job(job_id: str, request: ReviewRequest) -> None:
                 _jobs[job_id].update(status="failed", error=str(exc)[:500])
             _save_job(_jobs[job_id])
     finally:
-        if 'ephemeral_endpoint' in locals() and ephemeral_endpoint:
+        if 'ephemeral_endpoint' in locals() and ephemeral_endpoint and not ragas_started:
             unregister_endpoint(ephemeral_endpoint)
 
 
