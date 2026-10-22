@@ -48,3 +48,15 @@ test('MiniMax probe reserves reasoning budget consistently with review calls', a
     await handler(req,res); assert.equal(res.code,200);
   } finally { globalThis.fetch=original; }
 });
+
+test('TokenHarbor OpenAI-compatible URL is allowed', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url) => {
+      assert.equal(url, 'https://tokenharbor.ai/v1/chat/completions');
+      return {ok:true,json:async()=>({choices:[{message:{content:'{"ok":true}'}}]})};
+    };
+    const req = request(), res = response(); req.body.baseUrl='https://tokenharbor.ai/v1';
+    await handler(req,res); assert.equal(res.code,200); assert.equal(res.body.json_object_valid,true);
+  } finally { globalThis.fetch = original; }
+});
