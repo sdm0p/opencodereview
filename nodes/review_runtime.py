@@ -25,6 +25,12 @@ def changed_context(changed_file, mode):
     return '\n'.join(f'{index + 1}: {lines[index]}' for index in sorted(selected)) if selected else content
 
 
+def reviewer_timeout(mode="thorough"):
+    """Fast controls prompt size; hosted inference gets its own configurable budget."""
+    default = os.getenv("OCR_REVIEWER_TIMEOUT_SECONDS", "90")
+    return float(os.getenv("OCR_FAST_REVIEWER_TIMEOUT_SECONDS", default)) if mode == "fast" else float(default)
+
+
 def invoke_review(llm, schema, messages, mode="thorough"):
     """One request plus one format repair, within a total wall-clock budget.
 
@@ -32,9 +38,7 @@ def invoke_review(llm, schema, messages, mode="thorough"):
     SDK that ignores its native request timeout. Native timeouts still close
     underlying connections; timed-out workers never modify graph state.
     """
-    budget = float(os.getenv("OCR_REVIEWER_TIMEOUT_SECONDS", "90"))
-    if mode == "fast":
-        budget = min(budget, 45.0)
+    budget = reviewer_timeout(mode)
     deadline = time.monotonic() + budget
     instructions = (
         "Return ONLY a JSON object matching this schema, never a bare list. "
@@ -82,7 +86,19 @@ def invoke_review(llm, schema, messages, mode="thorough"):
 
 def stage_result(reviewer, started, *, error=None, llm=None):
     """Safe stage metadata; exception text may contain secrets, so omit it."""
+    kind = type(error).__name__ if error else ""
+    status = getattr(error, "status_code", None)
+    reason = None
+    if status == 401 or "AuthenticationError" in kind:
+        reason = "Provider rejected authentication. Check the saved API key and API base URL; use a key issued by that provider."
+    elif status == 429 or "RateLimitError" in kind:
+        reason = "Provider rate limit or shared capacity reached. Retry later or select another saved provider."
+    elif isinstance(error, TimeoutError) or "Timeout" in kind:
+        reason = "Provider did not finish within the reviewer deadline. Try a smaller PR or increase the server reviewer timeout."
+    elif error:
+        reason = "Reviewer failed. Check the backend logs for the provider or response-format error."
     return {"reviewer": reviewer, "status": "failed" if error else "completed",
+            "reason": reason,
             "error": type(error).__name__ if error else None,
             "duration_seconds": round(time.monotonic() - started, 3),
             "model": str(getattr(llm, "model_name", None) or getattr(llm, "model", "")) if llm else ""}

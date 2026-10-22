@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError
 
 from nodes.review_runtime import invoke_review
+from nodes.review_runtime import reviewer_timeout, stage_result
 from nodes.aggregator import aggregator_node
 from nodes.security_reviewer import security_reviewer_node
 from state import OpenCodeReviewState
@@ -17,6 +18,29 @@ from types import SimpleNamespace
 
 class Review(BaseModel):
     findings: list = Field(default_factory=list)
+
+
+def test_fast_timeout_is_configurable_without_hidden_cap(monkeypatch):
+    monkeypatch.setenv('OCR_REVIEWER_TIMEOUT_SECONDS', '90')
+    monkeypatch.delenv('OCR_FAST_REVIEWER_TIMEOUT_SECONDS', raising=False)
+    assert reviewer_timeout('fast') == 90
+    monkeypatch.setenv('OCR_FAST_REVIEWER_TIMEOUT_SECONDS', '120')
+    assert reviewer_timeout('fast') == 120
+    assert reviewer_timeout('thorough') == 90
+
+
+@pytest.mark.parametrize('status,expected', [(401, 'authentication'), (429, 'rate limit')])
+def test_error_reason_is_actionable_without_echoing_credentials(status, expected):
+    error = RuntimeError('secret-key-in-provider-message')
+    error.status_code = status
+    result = stage_result('security', time.monotonic(), error=error)
+    assert expected in result['reason']
+    assert 'secret-key' not in str(result)
+
+
+def test_timeout_reason_is_actionable():
+    result = stage_result('correctness', time.monotonic(), error=TimeoutError())
+    assert 'deadline' in result['reason']
 
 
 def test_tracing_context_survives_deadline_worker():

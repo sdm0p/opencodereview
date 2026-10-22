@@ -7,7 +7,7 @@ from pathlib import Path
 
 from llm_factory import create_llm
 from nodes.finding_quality import calibrate_findings
-from nodes.review_runtime import changed_context, invoke_review, stage_result
+from nodes.review_runtime import changed_context, invoke_review, stage_result, reviewer_timeout
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState
@@ -109,7 +109,7 @@ def test_coverage_reviewer_node(state: OpenCodeReviewState) -> dict:
                 'reason': 'Fast mode: documentation-only changes', 'duration_seconds': 0.0, 'model': ''}]}
 
     try:
-        llm = create_llm(endpoint=state.endpoint or None, **({"max_tokens": 1200, "timeout": 40} if state.review_mode == "fast" else {}))
+        llm = create_llm(endpoint=state.endpoint or None, timeout=reviewer_timeout(state.review_mode), **({"max_tokens": 1200} if state.review_mode == "fast" else {}))
     except ValueError as exc:
         logger.warning("LLM unavailable — skipping test-coverage review: %s", exc)
         return {"review_stages": [stage_result("test_coverage", started, error=exc, llm=locals().get("llm"))]}

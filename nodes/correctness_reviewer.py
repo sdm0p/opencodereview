@@ -8,7 +8,7 @@ from pathlib import Path
 
 from llm_factory import create_llm
 from nodes.finding_quality import calibrate_findings
-from nodes.review_runtime import changed_context, invoke_review, stage_result
+from nodes.review_runtime import changed_context, invoke_review, stage_result, reviewer_timeout
 from pydantic import BaseModel, Field
 
 from state import Finding, OpenCodeReviewState, Severity
@@ -136,10 +136,10 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
 
     # --- Build the LLM (Gemini primary → Groq fallback) -----------------------
     try:
-        llm = create_llm(endpoint=state.endpoint or None, **({"max_tokens": 1200, "timeout": 40} if state.review_mode == "fast" else {}))
+        llm = create_llm(endpoint=state.endpoint or None, timeout=reviewer_timeout(state.review_mode), **({"max_tokens": 1200} if state.review_mode == "fast" else {}))
     except ValueError as exc:
         logger.warning("LLM unavailable — skipping correctness review: %s", exc)
-        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc)]}
+        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc, llm=locals().get("llm"))]}
 
     # --- Build the prompt ----------------------------------------------------
     user_prompt = _build_prompt(state)
@@ -160,7 +160,7 @@ def correctness_reviewer_node(state: OpenCodeReviewState) -> dict:
         result: CorrectnessReview = invoke_review(llm, CorrectnessReview, messages, mode=state.review_mode)  # type: ignore[assignment]
     except Exception as exc:
         logger.warning("Correctness review LLM call failed: %s", exc)
-        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc)]}
+        return {"findings": static_findings, "review_stages": [stage_result("correctness", started, error=exc, llm=llm)]}
 
     # Deterministic guard for a high-impact async anti-pattern that LLMs can
     # miss: promises created by forEach are not awaited by the caller.
