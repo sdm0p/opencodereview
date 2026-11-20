@@ -1,601 +1,158 @@
----
-title: OpenCodeReview
-emoji: 🔍
-colorFrom: indigo
-colorTo: purple
-sdk: docker
-app_file: app.py
-pinned: false
----
-
-<h1 align="center">🔍 OpenCodeReview</h1>
+# OpenCodeReview
 
 <p align="center">
-  <b>AI-powered pull request review with human-in-the-loop approval.</b><br>
-  Three specialist LLM reviewers (correctness · security · test coverage) analyze every PR,
-  a vector store grounds them in your codebase's history, and nothing is posted to GitHub
-  until a human approves it.
+  <strong>AI-assisted pull request review, with a person in control of every post.</strong><br />
+  Focused reviewers analyze code changes, explain evidence, and wait for approval before comments go to GitHub.
 </p>
 
 <p align="center">
-  <a href="https://huggingface.co/spaces/sdm0/opencodereview"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue" alt="Hugging Face Space"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white" alt="Python 3.12+"></a>
-  <a href="#"><img src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C?logo=langchain" alt="LangGraph"></a>
-  <a href="#"><img src="https://img.shields.io/badge/LLMs-Gemini%20%7C%20Groq-blueviolet" alt="LLMs"></a>
-  <a href="#"><img src="https://img.shields.io/badge/License-Unlicensed-lightgrey" alt="License"></a>
+  <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white" alt="Python 3.12 or newer" />
+  <img src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white" alt="FastAPI backend" />
+  <img src="https://img.shields.io/badge/LangGraph-workflows-1C3C3C" alt="LangGraph workflows" />
+  <img src="https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=20232A" alt="React and Vite frontend" />
 </p>
 
----
+OpenCodeReview is a GitHub pull request reviewer built around a simple rule: **AI proposes; a human decides what gets posted.** A FastAPI service starts a LangGraph review, specialist agents examine the change, and a reviewer can inspect the evidence before approving GitHub comments.
 
-## 📑 Table of Contents
+## What it does
 
-- [✨ Features](#features)
-- [🔄 How It Works](#how-it-works)
-- [🏗️ Architecture](#architecture)
-- [🧱 Tech Stack](#tech-stack)
-- [🚀 Quick Start](#quick-start)
-- [💻 CLI Usage](#cli-usage)
-- [🖥️ Web UI (Gradio)](#web-ui-gradio)
-- [🔐 Authentication](#authentication)
-- [⚙️ Configuration](#configuration)
-- [🔑 Environment Variables](#environment-variables)
-- [🐳 Docker](#docker)
-- [📊 Evaluation](#evaluation)
-- [🔭 Observability](#observability)
-- [🔔 Alerting](#alerting)
-- [📁 Project Structure](#project-structure)
-- [🧪 Testing](#testing)
-- [📜 License](#license)
+- Reviews **correctness, security, and test coverage** with separate specialist steps that can run in parallel.
+- Retrieves relevant context from selected repository files when optional RAG is enabled.
+- Returns structured findings with locations, evidence status, severity, and suggested fixes.
+- Makes incomplete reviewer stages visible; a failed stage is never presented as proof that code is safe.
+- Pauses for human approval before the executor posts findings to GitHub.
+- Includes a React and Vite frontend, a CLI, a FastAPI API, and an optional Gradio interface.
 
----
+## System architecture
 
-## ✨ Features
+![OpenCodeReview deployment and runtime architecture](docs/project-guide/assets/architecture.png)
 
-- **Three parallel specialist reviewers** — correctness, security, and test-coverage reviewers
-  run concurrently on the same diff, each with its own versioned system prompt.
-- **Retrieval-augmented review** — a persistent [ChromaDB](https://www.trychroma.com/) vector
-  store indexes your repository's source code, past merged-PR discussions, and docs, so
-  reviewers get relevant context (e.g. *"this function is called from X"*) — not just the diff.
-- **Human-in-the-loop approval** — the pipeline **pauses** before posting anything. A human
-  reviews the verdict and findings, then approves, rejects, or quits.
-- **Inline comments** — approved findings are posted as **PR review comments at the exact
-  file/line position**, with automatic fallback to issue-level comments when a line has gone stale (422).
-- **Smart aggregation** — heuristic deduplication (file/line proximity + confidence) plus a
-  rule-based verdict (with an optional LLM critic pass) that filters noise before humans see it.
-- **LLM fallback chain** — Google Gemini (primary, generous free tier) → Groq (fallback),
-  zero code changes required.
-- **Full observability** — LangSmith & Langfuse tracing, per-run token cost & TTFT tracking,
-  RAGAS retrieval-quality scoring, and a health-check CLI (`doctor`).
-- **Evaluation harness** — measure precision/recall/F1 against ground-truth human review
-  comments, plus RAGAS retrieval metrics.
-- **Web UI & CLI** — a polished Gradio interface and a full-featured Click CLI.
-- **GitHub OAuth (Device Flow)** — authenticate interactively; tokens stored in your OS keyring.
+The review graph is:
 
----
-
-## 🔄 How It Works
-
-```
-                         ┌────────────────────────────────────────────────┐
-                         │           GitHub Pull Request                │
-                         └──────────────────────┬───────────────────────┘
-                                                ▼
-                                   ┌────────────────────────┐
-        START ────────────────────▶│       ingestion        │  Fetch PR metadata, unified
-                                   │      (no-op if diff    │  diff, and full file contents
-                                   │      already present)  │  from the GitHub API
-                                   └───────────┬────────────┘
-                                               ▼
-                                   ┌────────────────────────┐
-                                   │       retrieval        │  Build/load a ChromaDB vector
-                                   │                        │  store of the repo's source,
-                                   │                        │  past merged PRs & docs; query
-                                   │                        │  it with the diff → context
-                                   └───────────┬────────────┘
-                                               │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    ▼                          ▼                          ▼
-        ┌────────────────────┐     ┌────────────────────┐     ┌────────────────────┐
-        │  correctness_review │     │   security_review  │     │ test_coverage_review│
-        │  (logic, edge cases,│     │  (injection, auth, │     │  (are the changes  │
-        │   null checks, ...) │     │   secrets, ...)    │     │   properly tested?)│
-        └─────────┬──────────┘     └─────────┬──────────┘     └─────────┬──────────┘
-                  │                          │                          │
-                  └──────────────────────────┼──────────────────────────┘
-                                             ▼
-                                   ┌────────────────────────┐
-                                   │       aggregator       │  Deduplicate findings, filter
-                                   │                        │  noise, produce final verdict
-                                   │                        │  (rule-based or LLM critic)
-                                   └───────────┬────────────┘
-                                               ▼
-                                   ┌────────────────────────┐
-                                   │    human_approval      │  ⏸ PAUSES here — a human
-                                   │   (interrupt() pause)  │  must approve before posting
-                                   └───────────┬────────────┘
-                                               ▼
-                                   ┌────────────────────────┐
-                                   │        executor        │  Post inline review comments
-                                   │                        │  (422 → issue-comment fallback)
-                                   └───────────┬────────────┘
-                                               ▼
-                                              END
+```mermaid
+flowchart LR
+    A[Pull request] --> B[Ingestion]
+    B --> C[Optional repository retrieval]
+    C --> D1[Correctness reviewer]
+    C --> D2[Security reviewer]
+    C --> D3[Test coverage reviewer]
+    D1 --> E[Grounding and aggregation]
+    D2 --> E
+    D3 --> E
+    E --> F{Human approval}
+    F -->|Approve| G[Post comments to GitHub]
+    F -->|Reject| H[Finish without posting]
 ```
 
-### Pipeline steps in detail
+The API persists job records in Supabase Postgres when configured and otherwise uses SQLite. LangGraph checkpoints use a separate SQLite saver. The current worker and some session state are process-local, so horizontal scaling needs a durable queue and shared runtime state.
 
-| # | Node | What happens |
-|---|------|--------------|
-| 1 | **ingestion** | Fetches PR metadata, the full unified diff, and per-file content (handles fork PRs, pagination, rate limits). Uses the head commit SHA. |
-| 2 | **retrieval** | Builds (once per base-branch SHA, cached) a ChromaDB collection embedding the repo's source files, up to 20 past merged PRs, and docs (README, CONTRIBUTING…). Queries it with the diff, returns the top 15 context chunks. |
-| 3 | **correctness_review** | LLM scans for logic errors, off-by-one bugs, missing null checks, resource leaks, concurrency hazards. |
-| 4 | **security_review** | LLM scans for injection, secrets, unsafe deserialization, auth flaws, crypto misuse, information disclosure. |
-| 5 | **test_coverage_review** | LLM checks whether the changed logic has adequate test coverage. |
-| 6 | **aggregator** | Merges findings that point at the same file/line (±5 lines), keeps the highest-confidence one, drops noise below `0.25` confidence, then produces a verdict — either rule-based (default, ~10 ms, zero LLM cost) or via an optional LLM critic (`AGGREGATOR_USE_LLM_CRITIC=true`). |
-| 7 | **human_approval** | Calls LangGraph's `interrupt()` — the graph **pauses** and returns the verdict + findings to the caller. Nothing is posted until the human resumes with `approve` / `reject`. |
-| 8 | **executor** | Posts each finding as an **inline PR review comment** (right side of the diff, multi-line ranges supported). If GitHub returns `422` (stale line), falls back to a general issue comment. Finally posts the overall verdict as a summary comment. |
+## How a review works
 
-### Verdict logic (rule-based default)
+1. **Submit a repository and pull request.** The frontend sends the job to FastAPI; GitHub credentials are resolved from the configured environment or OS keyring.
+2. **Collect evidence.** Ingestion fetches the pull request metadata, diff, changed files, and base revision.
+3. **Find useful context.** If retrieval is enabled, the system builds or reuses a ChromaDB collection for the repository's base revision. It selects supported source, documentation, and configuration files, skips excluded paths, and retrieves up to 15 relevant chunks. Python is split at top-level classes and functions; other supported text is split around paragraphs with a chunk target of about 1,200 characters.
+4. **Run focused reviews.** Correctness, security, and test-coverage steps use separate prompts and structured Pydantic outputs, with file and line references when available.
+5. **Check and combine findings.** Grounding checks compare findings with the changed lines. Aggregation removes overlap and produces a risk summary. These checks reduce unsupported comments but cannot guarantee that a model's claim is correct.
+6. **Ask a person.** The graph pauses so the reviewer can approve or reject the proposed comments.
+7. **Post only after approval.** The executor sends approved comments to GitHub and records the result.
 
-| Condition | Recommendation | Approved |
-|---|---|---|
-| ≥ 1 critical finding | `block` | ❌ |
-| ≥ 1 high finding | `request_changes` | ❌ |
-| any medium/low/info finding | `comment` | ✅ |
-| no findings | `approve` | ✅ |
+## Model and retrieval options
 
-Score: `10 − 4·critical − 2·high − 0.5·medium` (clamped to 0–10).
+The model factory supports the built-in Groq and Google Gemini providers, plus configured custom endpoints such as OpenAI-compatible APIs and Anthropic. An explicitly selected endpoint is used for that run; otherwise the default path prefers Groq when configured and falls back to Gemini. Built-in provider keys are read from environment variables. GitHub access can use a token or the OAuth Device Flow, which stores its token in the OS keyring.
 
----
+Retrieval is optional. It uses ChromaDB with local embeddings when enabled; the hosted workflow can continue with the pull request diff when retrieval is disabled or unavailable. The index is selective and revision-aware, rather than a blind copy of every repository file.
 
-## 🏗️ Architecture
+## Try it locally
 
-The system is a **LangGraph state machine** with a typed Pydantic state schema and SQLite
-checkpointing (needed for the interrupt/resume round-trip):
+### Requirements
 
-- **`OpenCodeReviewState`** carries PR metadata (`repo`, `pr_number`, `base_sha`, `diff`,
-  `changed_files`), retrieved context (`context_chunks`, accumulated via an `add` reducer),
-  findings (`findings` → `final_findings`), the `verdict`, and the `human_approved` flag.
-- **Parallelism** — retrieval fans out to the three reviewers in parallel; LangGraph merges
-  their accumulated findings at the aggregator.
-- **Checkpointing** — every run is persisted to SQLite (`SqliteSaver`), so a paused graph can
-  be resumed after a page reload or a process restart via the same thread ID.
+- Python 3.12 or newer
+- Node.js and npm, only if you want to run the React frontend
+- For real pull requests: GitHub access and at least one supported model provider key
 
-### Tech stack
+### Install and run the offline smoke review
 
-| Layer | Technology |
-|---|---|
-| Orchestration | [LangGraph](https://www.langchain.com/langgraph) (StateGraph + `interrupt()`) |
-| LLMs | Google Gemini `gemini-3.1-flash-lite` (primary) → Groq `llama-3.3-70b-versatile` (fallback) |
-| Structured output | Pydantic v2 schemas via `with_structured_output` |
-| Vector store | ChromaDB (PersistentClient) + ONNX MiniLM-L6-v2 embeddings |
-| GitHub integration | `requests`-based client with token resolution, 401 resilience, 15-min HTTP cache |
-| Web UI | Gradio (dark/light theme, live pipeline status) |
-| CLI | Click (with `OCR_` env-var prefix support) |
-| Tracing | LangSmith (auto) + Langfuse (explicit callback) |
-| Quality | RAGAS retrieval metrics + ground-truth eval harness |
-| Auth | GitHub OAuth Device Flow, tokens stored in OS keyring |
-| Deployment | Docker (multi-stage), Docker Compose, Hugging Face Spaces, GitHub Actions |
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python **3.12+**
-- A **GitHub token** (`GITHUB_TOKEN` or `opencodereview auth login`) — required to fetch PRs and post comments
-- **One LLM key**: `GEMINI_API_KEY` (preferred) or `GROQ_API_KEY` (fallback)
-
-### Installation
-
-```bash
-# 1. Clone & enter
+```powershell
 git clone https://github.com/sdm0p/opencodereview.git
 cd opencodereview
 
-# 2. (Recommended) Create a virtual environment
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set your API keys
-export GITHUB_TOKEN="ghp_..."
-export GEMINI_API_KEY="AIza..."      # primary LLM
-# export GROQ_API_KEY="gsk_..."      # fallback LLM
-```
-
-### Run your first review (smoke test)
-
-```bash
-# Runs the full pipeline on a synthetic demo PR — no API keys or network needed
 python main.py review --smoke
 ```
 
-### Review a real PR
+The smoke review uses synthetic input and does not need GitHub or model credentials.
+
+### Review a real pull request
+
+Copy `.env.example` to `.env`, then set a GitHub token and a supported model key. `.env` is ignored by Git; never commit credentials.
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env, then:
+python main.py review --repo OWNER/REPOSITORY --pr 123
+```
+
+The CLI supports GitHub OAuth Device Flow as well as token-based access. Run `python main.py --help` or `python main.py auth --help` for the current commands.
+
+### Run the API and frontend
+
+In one terminal from the repository root:
+
+```powershell
+uvicorn api:app --reload --port 8000
+```
+
+In another terminal:
+
+```powershell
+cd frontend
+npm ci
+# Set VITE_REVIEW_API_URL=http://localhost:8000 in frontend/.env.local
+npm run dev
+```
+
+The root Python modules are small compatibility shims, so existing launch commands continue to work while the implementation lives in `backend/`.
+
+## Development and evaluation
+
+Run the automated checks with:
 
 ```bash
-python main.py review --repo psf/requests --pr 42
+python -m pytest -q
 ```
 
-The pipeline fetches the PR, reviews it, and **pauses** for your decision:
+The `eval_data/` tools provide an offline scorer against human review comments and a RAGAS evaluation path for retrieval and generation metrics. These tools are evaluation infrastructure, not a claim of a particular quality score. Results depend on the dataset, provider, and run configuration.
 
-```text
-  HUMAN-IN-THE-LOOP: Approve this review for posting?
-  [a] Approve — post findings as GitHub comments
-  [r] Reject  — discard results, post nothing
-  [q] Quit    — leave graph paused
-```
+## Project map
 
----
-
-## 💻 CLI Usage
-
-```
-python main.py [COMMAND] [SUBCOMMAND] [OPTIONS]
-```
-
-`review` and `doctor` are standalone commands; `auth` and `config` have their own subcommands
-(e.g. `python main.py auth login`, `python main.py config show`).
-
-Every option also works as an environment variable with the `OCR_` prefix
-(e.g. `--repo` → `OCR_REPO`, `--pr` → `OCR_PR_NUMBER`).
-
-### `review` — run the review pipeline
-
-| Option | Default | Description |
-|---|---|---|
-| `--repo OWNER/REPO` | `demo-org/demo-repo` | GitHub repository to review |
-| `--pr N` | `1` | Pull request number |
-| `--smoke` | — | Non-interactive smoke test on synthetic data (skips the HITL prompt) |
-
-> **Note:** with the default repo/PR the CLI uses the built-in synthetic payload so you can
-> try the tool instantly. Pass real `--repo`/`--pr` values to review an actual PR.
-
-```bash
-python main.py review --smoke                            # offline pipeline check
-python main.py review --repo psf/requests --pr 42        # review a real PR
-python main.py review --repo private/org --pr 7          # private repos need a token
-```
-
-### `doctor` — health checks
-
-```bash
-python main.py doctor
-```
-
-Checks Python version, API keys, observability backends, and live connectivity to
-Groq / Langfuse.
-
-### `auth` — GitHub authentication
-
-```bash
-python main.py auth login      # OAuth Device Flow (prints a code to enter on GitHub)
-python main.py auth status     # show the authenticated user
-python main.py auth logout     # remove the stored token
-```
-
-### `config` — secrets & settings management
-
-```bash
-python main.py config set-key --provider anthropic      # store an API key in the keyring
-python main.py config show                              # masked summary of configured keys
-python main.py config set-observability \
-  --langsmith-api-key ls_... \
-  --langfuse-public-key pk-lf-... \
-  --langfuse-secret-key sk-lf-...
-```
-
----
-
-## 🖥️ Web UI (Gradio)
-
-A full web interface ships with the project — this is also what runs on
-[Hugging Face Spaces](https://huggingface.co/spaces/sdm0/opencodereview).
-
-```bash
-python app.py            # serves at http://localhost:7860
-```
-
-Features:
-
-- **Review a PR** tab — enter `owner/repo` + PR number, watch the pipeline run, then
-  **Approve & Post** or **Reject** the results.
-- **Smoke Test** tab — run the pipeline on synthetic demo data (no keys needed).
-- Severity-colored findings table, verdict card, RAGAS retrieval-quality bars,
-  per-run cost summary.
-- Dark/light theme toggle (persisted in `localStorage`).
-- **Configured Keys & Health** accordion showing which keys are set.
-
----
-
-## 🔐 Authentication
-
-OpenCodeReview needs GitHub credentials to fetch PR data and (on approval) post comments.
-Tokens are resolved in this priority order: **OS keyring → `GITHUB_TOKEN` env var**.
-
-### Option A — OAuth Device Flow (recommended)
-
-```bash
-export GITHUB_OAUTH_CLIENT_ID="<your OAuth app client id>"
-python main.py auth login
-```
-
-1. Register an OAuth app at `https://github.com/settings/developers` and **enable Device Flow**.
-2. Run `auth login` — you'll get a one-time code and a verification URL.
-3. Open the URL, enter the code, authorize. The token is stored securely in your keyring
-   (scope: `repo`).
-
-### Option B — Personal access token
-
-```bash
-export GITHUB_TOKEN="ghp_..."
-```
-
-> 💡 The client automatically detects invalid/revoked tokens (HTTP 401) and raises a
-> helpful error telling you to re-authenticate.
-
----
-
-## ⚙️ Configuration
-
-Configuration is resolved with the priority **environment variable → system keyring → error**:
-
-- Provider API keys (e.g. Anthropic via `config set-key`) follow
-  `OPENCODEREVIEW_<FIELD>` env naming.
-- GitHub token and observability keys can be stored in the keyring via
-  `auth login` / `config set-observability`; env vars always take precedence.
-- The HTTP cache (`requests-cache`, 15-min TTL) and the ChromaDB vector store live under
-  `.opencodereview/` in the working directory unless overridden (see env vars below).
-
----
-
-## 🔑 Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | Primary LLM | Google Gemini key — used for all reviewer nodes |
-| `GROQ_API_KEY` | Fallback LLM | Groq key — used when Gemini is unavailable |
-| `GITHUB_TOKEN` | Yes¹ | GitHub token for fetching PRs & posting comments |
-| `GITHUB_OAUTH_CLIENT_ID` | For `auth login` | GitHub OAuth App client ID (Device Flow) |
-| `LANGSMITH_API_KEY` | No | LangSmith tracing (legacy alias: `LANGCHAIN_API_KEY`) |
-| `LANGSMITH_PROJECT` | No | LangSmith project name (default `opencodereview`) |
-| `LANGFUSE_PUBLIC_KEY` | No | Langfuse public key |
-| `LANGFUSE_SECRET_KEY` | No | Langfuse secret key |
-| `LANGFUSE_HOST` | No | Langfuse host (default `https://cloud.langfuse.com`) |
-| `OPENCODEREVIEW_CACHE_DIR` | No | HTTP cache directory (default `.opencodereview/`) |
-| `OPENCODEREVIEW_VECTOR_DIR` | No | ChromaDB vector-store directory (default `.opencodereview/vectors`) |
-| `AGGREGATOR_USE_LLM_CRITIC` | No | `true` to enable the optional LLM aggregator pass (default: rule-based) |
-| `PORT` | No | Gradio server port (default `7860`) |
-| `DISCORD_WEBHOOK` / `SLACK_WEBHOOK` | For alerting | Alerting webhooks (see [Alerting](#alerting)) |
-
-¹ No token is required when reviewing the built-in demo payload — a token is only strictly
-required to review real PRs.
-
----
-
-## 🐳 Docker
-
-### Build & run
-
-```bash
-# Build
-docker build -t opencodereview .
-
-# Smoke test
-docker run --rm opencodereview python -m main review --smoke
-
-# Review a real PR
-docker run --rm \
-  -e GROQ_API_KEY=gsk_... \
-  -e GITHUB_TOKEN=ghp_... \
-  opencodereview python -m main review --repo org/repo --pr 42
-
-# Web UI
-docker run --rm -p 7860:7860 \
-  -e GROQ_API_KEY=gsk_... \
-  -e GITHUB_TOKEN=ghp_... \
-  opencodereview
-```
-
-### Docker Compose
-
-```bash
-# 1. Put your keys in a .env file
-#      GROQ_API_KEY=gsk_...
-#      GITHUB_TOKEN=ghp_...
-
-# 2. Smoke test
-docker compose run --rm opencodereview review --smoke
-
-# 3. Review a real PR
-docker compose run --rm opencodereview review --repo org/repo --pr 42
-
-# 4. Run evaluation
-docker compose run --rm opencodereview python eval_data/evaluate.py --max-prs 2
-```
-
-The vector store is persisted in a named volume (`opencodereview_vectors`) so embeddings are
-not rebuilt on every run.
-
-### Image variants
-
-- **`runtime`** (default) — full app; vector-store retrieval uses the lightweight **ONNX**
-  MiniLM embedder, so no PyTorch is needed.
-- **`runtime-full`** — adds `sentence-transformers` (PyTorch, ~800 MB) if you need it:
-  `docker build --target runtime-full -t opencodereview:full .`
-
-### Deployment
-
-- **Hugging Face Spaces**: push to `main` triggers
-  `.github/workflows/deploy-hf.yml`, which syncs the repo to
-  `sdm0/opencodereview` and restarts the Space (Docker SDK, port 7860). Set
-  `GROQ_API_KEY` / `GITHUB_TOKEN` as Space secrets.
-
----
-
-## 📊 Evaluation
-
-Evaluate the agent against **ground-truth human review comments**.
-
-### 1. Build the dataset
-
-```bash
-python eval_data/fetcher.py        # requires GITHUB_TOKEN
-```
-
-Produces `eval_data/prs.jsonl` — one JSON object per PR with its diff, changed files, and the
-human review comments used as ground truth.
-
-### 2. Run evaluation
-
-```bash
-python eval_data/evaluate.py                    # full run
-python eval_data/evaluate.py --max-prs 2        # quick smoke run
-python eval_data/evaluate.py --verbose          # per-finding match details
-python eval_data/evaluate.py --match-keywords   # keyword-overlap matching bonus
-python eval_data/evaluate.py --ragas            # + RAGAS retrieval metrics
-python eval_data/evaluate.py --log-to-observability   # log scores to LangSmith/Langfuse
-```
-
-Findings are matched to human comments by **file path + line proximity (±3 lines)** (with an
-optional keyword-overlap bonus), then **precision / recall / F1** are computed per PR plus
-micro- and macro-averages. Results are written to `eval_data/eval_results.json`.
-
-> ⚠️ The evaluator refuses to run while `GITHUB_TOKEN` is set (the executor would post to real
-> PRs). Unset it, or pass `--force` to acknowledge.
-
-### RAGAS retrieval metrics
-
-`eval_data/ragas_eval.py` scores retrieval & generation quality:
-
-| Metric | Question it answers |
+| Path | Responsibility |
 |---|---|
-| `context_precision` | Are the most relevant code chunks ranked first? |
-| `context_recall` | Did we find *all* the relevant code? (needs ground truth) |
-| `faithfulness` | Does the review stick to the retrieved code? |
-| `answer_relevancy` | Does the review address the PR diff? |
-| `mmr` | How early does the first useful chunk appear? |
+| `backend/` | FastAPI API, CLI, LangGraph construction, typed state, and observability |
+| `backend/integrations/` | GitHub access, authentication, settings, model clients, and endpoints |
+| `nodes/` | Ingestion, retrieval, specialist reviewers, grounding, approval, and execution |
+| `prompts/` | Versioned reviewer and aggregator prompt templates |
+| `frontend/` | React and Vite user interface, deployed separately from the Python service |
+| `eval_data/`, `tests/` | Offline evaluation data, RAGAS tooling, and automated tests |
+| `docs/` | Architecture, runbooks, engineering notes, specification, and interview guide |
+| `Dockerfile*`, `docker-compose.yml` | Backend container and local orchestration |
+| `.github/workflows/` | Deployment and scheduled alert workflows |
 
-Standalone CLI: `python eval_data/ragas_eval.py --data eval_data/prs.jsonl`
+Start with the [documentation index](docs/README.md) or read the [architecture overview](docs/architecture/ARCHITECTURE.md). The editable interview guide and PDF are in [`docs/project-guide/`](docs/project-guide/README.md).
 
----
+## Current boundaries
 
-## 🔭 Observability
+- Model output can be wrong. Evidence checks and human approval are safeguards, not guarantees.
+- The worker queue and some session data are process-local; production multi-replica use needs shared, durable infrastructure.
+- RAG is opt-in and depends on GitHub access, ChromaDB, and embedding availability.
+- The evaluation harness is included, but users should run it on their own representative dataset before making quality claims.
 
-Two optional backends — the app runs fine with neither:
+## About
 
-- **LangSmith** — enabled automatically when `LANGSMITH_API_KEY` (or legacy
-  `LANGCHAIN_API_KEY`) is set. Full graph traces out of the box.
-- **Langfuse** — enabled when `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` are set.
-  The pipeline creates a trace per review, and logs **scores** linked to that trace:
-  - `verdict_score`, `findings_count`
-  - `ragas_context_precision`, `ragas_faithfulness`, `ragas_answer_relevancy`, `ragas_mmr`, …
+OpenCodeReview is a practical AI engineering project for human-reviewed code review. It brings together retrieval, multi-step agent orchestration, structured model output, GitHub integration, and evaluation while keeping the approval boundary visible.
 
-Every run also tracks **token cost** (USD, via Groq pricing) and **TTFT**, printed at the end
-of each CLI run and shown in the web UI.
+## License
 
----
-
-## 🔔 Alerting
-
-`scripts/alert.py` is a continuous health monitor: it runs the smoke-test review, compares the
-resulting score against a stored baseline, and pings a **Discord or Slack webhook** when the
-score deviates by more than `2.5` points or the run fails.
-
-```bash
-python scripts/alert.py \
-  --baseline-file scripts/alert_baseline.json \
-  --discord-webhook "$DISCORD_WEBHOOK"
-
-python scripts/alert.py --slack-webhook "$SLACK_WEBHOOK" --update-baseline
-```
-
-A GitHub Actions workflow (`.github/workflows/alert.yml`) runs this **every 6 hours**
-(set `GROQ_API_KEY`, `GITHUB_TOKEN`, and the webhook URLs as repository secrets).
-
----
-
-## 📁 Project Structure
-
-Root modules such as `main.py`, `app.py`, and `combined_server.py` remain as
-compatibility shims so existing commands and imports keep working.
-
-```
-opencodereview/
-├── docs/                        # Architecture, runbooks, plans, and interview guide
-│   ├── architecture/
-│   ├── engineering/
-│   ├── evaluation/
-│   ├── operations/
-│   ├── planning/
-│   ├── project-guide/            # DOCX/PDF guide, source diagrams, and build tools
-│   ├── runbooks/
-│   └── specifications/
-├── backend/                     # Python application and workflow package
-│   ├── api.py                   # FastAPI job, approval, and persistence boundary
-│   ├── app.py                   # Gradio UI and review orchestration adapter
-│   ├── combined_server.py       # Uvicorn app joining FastAPI and Gradio
-│   ├── graph.py                 # LangGraph workflow and checkpointing
-│   ├── main.py                  # Click CLI — review / doctor / auth / config
-│   ├── state.py                 # Typed Pydantic workflow state
-│   ├── observability.py         # LangSmith/Langfuse, cost and health helpers
-│   └── integrations/            # GitHub auth, config, providers, and endpoints
-│       ├── auth.py
-│       ├── config.py
-│       ├── endpoints.py
-│       ├── github_client.py
-│       └── llm_factory.py
-├── nodes/                       # One module per LangGraph step
-├── prompts/                     # Versioned reviewer prompts
-├── eval_data/                   # Offline and RAGAS evaluation tools/data
-├── tests/                       # Unit and integration-style tests
-├── scripts/                     # Health alert tooling
-├── frontend/                    # React/Vite site deployed on Vercel
-├── supabase/migrations/         # Database schema migrations
-├── Dockerfile, Dockerfile.api   # Backend container definitions
-├── docker-compose.yml
-├── docker-entrypoint.sh
-├── requirements.txt
-└── .github/workflows/           # Deployment and scheduled health checks
-```
-
-Supporting documentation is indexed in [`docs/README.md`](docs/README.md).
-
-The root Python entry points remain as compatibility shims. Existing commands
-such as `python main.py`, `python app.py`, and `uvicorn combined_server:app`
-continue to work while the implementation lives under `backend/`.
-
----
-
-## 🧪 Testing
-
-The `tests/` directory contains focused checks for scheduling, finding
-grounding, ingestion, reviewer runtime, and evaluation behavior. Install
-`pytest` in the development environment if it is not already present, then run:
-
-```bash
-python -m pytest
-```
-
-Additional application checks include:
-
-```bash
-# Smoke test: runs the graph on synthetic data and verifies interrupt/resume
-python main.py review --smoke
-
-# Doctor: checks env, keys, and connectivity
-python main.py doctor
-
-# Quick evaluation run on the first 2 PRs
-python eval_data/evaluate.py --max-prs 2
-```
-
----
-
-## 📜 License
-
-This project is currently **unlicensed** (all rights reserved) — no license file is
-distributed with the repository. Please contact the maintainers before reusing code.
+No license file is currently included in this repository.
