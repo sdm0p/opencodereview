@@ -50,9 +50,9 @@ from langgraph.types import Command
 # Add project root to sys.path so we can import graph/state
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from graph import build_graph
-from observability import langfuse_trace, _resolve_langfuse_trace_id
-from state import ChangedFile, Finding
+from backend.graph import build_graph
+from backend.observability import langfuse_trace, _resolve_langfuse_trace_id
+from backend.state import ChangedFile, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -594,7 +594,7 @@ def _log_to_observability(results: list[dict]) -> None:
 
     This function is called only when ``--log-to-observability`` is passed.
     """
-    from observability import (
+    from backend.observability import (
         is_langfuse_enabled,
         is_langsmith_enabled,
         log_langfuse_score,

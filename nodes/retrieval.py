@@ -21,8 +21,8 @@ except ImportError:
     Collection = None  # type: ignore[assignment,misc]
     embedding_functions = None  # type: ignore[assignment]
 
-from github_client import GitHubSession
-from state import ContextChunk, OpenCodeReviewState
+from backend.integrations.github_client import GitHubSession
+from backend.state import ContextChunk, OpenCodeReviewState
 
 logger = logging.getLogger(__name__)
 

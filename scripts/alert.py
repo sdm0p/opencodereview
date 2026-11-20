@@ -41,10 +41,10 @@ sys.path.insert(0, str(_project_root))
 import urllib.request
 import urllib.error
 
-from graph import build_graph
+from backend.graph import build_graph
 from langgraph.types import Command
-from main import SYNTHETIC_STATE
-from observability import TokenCostCallback, build_run_metadata, langfuse_trace
+from backend.main import SYNTHETIC_STATE
+from backend.observability import TokenCostCallback, build_run_metadata, langfuse_trace
 
 logging.basicConfig(
     level=logging.INFO,

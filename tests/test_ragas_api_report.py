@@ -12,7 +12,7 @@ def test_metric_report_survives_top_level_completion():
                'context_precision': {'status': 'failed', 'error': 'Timeout'}}
     task = {'done': True, 'scores': {'faithfulness': .8}, 'metrics': metrics,
             'evaluation': {'engine': 'RAGAS'}}
-    tree = ast.parse(Path('api.py').read_text(encoding='utf-8'))
+    tree = ast.parse(Path('backend/api.py').read_text(encoding='utf-8'))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_with_ragas')
     ns = {'Any': Any, '_public_job': lambda item: dict(item), '_ragas_lock': threading.Lock(),
           '_lock': threading.Lock(), '_ragas_tasks': {'task': task}, '_jobs': {'job': job}, '_save_job': Mock()}

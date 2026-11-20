@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from state import Finding, OpenCodeReviewState, Severity
+from backend.state import Finding, OpenCodeReviewState, Severity
 
 
 def patch_lines(patch: str) -> tuple[dict[int, str], set[int]]:

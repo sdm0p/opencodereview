@@ -31,7 +31,15 @@ import logging
 import os
 import threading
 import time
+import sys
+from pathlib import Path
 from typing import Any, Optional
+
+# Keep direct execution via ``python eval_data/ragas_eval.py`` working after
+# backend modules were moved into the backend package.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +205,8 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 
     try:
         if endpoint:
-            from llm_factory import create_llm
-            from endpoints import EndpointConfig, get_endpoint
+            from backend.integrations.llm_factory import create_llm
+            from backend.integrations.endpoints import EndpointConfig, get_endpoint
             configured = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
             timeout = 15
             if configured and not getattr(configured, "builtin", False) and configured.provider not in {"google", "anthropic"}:
@@ -210,7 +218,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             logger.info("RAGAS evaluator: using selected custom endpoint")
             return _wrap_evaluator(llm)
 
-        from llm_factory import _get_groq_chat, _get_gemini_chat
+        from backend.integrations.llm_factory import _get_groq_chat, _get_gemini_chat
 
         # Keep evaluation bounded: RAGAS runs several provider calls and
         # retrying each one can otherwise hold a review open for minutes.
@@ -497,7 +505,7 @@ def log_ragas_scores_to_langfuse(
         Handler from the current review run, used to link scores to the trace.
     """
     try:
-        from observability import log_langfuse_score
+        from backend.observability import log_langfuse_score
     except ImportError:
         logger.debug("observability module not available — skipping Langfuse")
         return

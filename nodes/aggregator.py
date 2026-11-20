@@ -4,11 +4,11 @@ import logging
 import os
 from pathlib import Path
 
-from llm_factory import create_llm
+from backend.integrations.llm_factory import create_llm
 from nodes.finding_quality import calibrate_findings, review_coverage
 from pydantic import BaseModel, Field
 
-from state import Finding, OpenCodeReviewState, Severity, Verdict
+from backend.state import Finding, OpenCodeReviewState, Severity, Verdict
 
 logger = logging.getLogger(__name__)
 

@@ -6,8 +6,8 @@ import os
 import requests
 from typing import Any
 
-from github_client import GitHubSession, resolve_token
-from state import Finding, OpenCodeReviewState
+from backend.integrations.github_client import GitHubSession, resolve_token
+from backend.state import Finding, OpenCodeReviewState
 
 logger = logging.getLogger(__name__)
 

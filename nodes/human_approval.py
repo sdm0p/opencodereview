@@ -5,7 +5,7 @@ from typing import Literal
 
 from langgraph.types import interrupt
 
-from state import OpenCodeReviewState
+from backend.state import OpenCodeReviewState
 
 logger = logging.getLogger(__name__)
 

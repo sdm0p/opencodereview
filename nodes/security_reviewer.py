@@ -5,12 +5,12 @@ import logging
 import os
 from pathlib import Path
 
-from llm_factory import create_llm
+from backend.integrations.llm_factory import create_llm
 from nodes.finding_quality import calibrate_findings
 from nodes.review_runtime import changed_context, invoke_review, stage_result, reviewer_timeout
 from pydantic import BaseModel, Field
 
-from state import Finding, OpenCodeReviewState
+from backend.state import Finding, OpenCodeReviewState
 
 logger = logging.getLogger(__name__)
 

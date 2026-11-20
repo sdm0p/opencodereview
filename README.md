@@ -520,53 +520,70 @@ A GitHub Actions workflow (`.github/workflows/alert.yml`) runs this **every 6 ho
 
 ## 📁 Project Structure
 
+Root modules such as `main.py`, `app.py`, and `combined_server.py` remain as
+compatibility shims so existing commands and imports keep working.
+
 ```
 opencodereview/
-├── app.py                       # Gradio web UI (entry point for HF Spaces)
-├── main.py                      # Click CLI — review / doctor / auth / config
-├── auth.py                      # GitHub OAuth Device Flow
-├── config.py                    # Settings resolution (env → keyring), config CLI
-├── graph.py                     # LangGraph pipeline + SqliteSaver checkpointing
-├── state.py                     # Typed Pydantic state schema (Findings, Verdict, …)
-├── llm_factory.py               # Gemini → Groq fallback model factory
-├── github_client.py             # GitHub API session, token resolution, HTTP caching
-├── observability.py             # LangSmith/Langfuse, cost & TTFT tracking, health checks
-├── requirements.txt
-├── Dockerfile                   # Multi-stage build (builder → runtime → runtime-full)
+├── docs/                        # Architecture, runbooks, plans, and interview guide
+│   ├── architecture/
+│   ├── engineering/
+│   ├── evaluation/
+│   ├── operations/
+│   ├── planning/
+│   ├── project-guide/            # DOCX/PDF guide, source diagrams, and build tools
+│   ├── runbooks/
+│   └── specifications/
+├── backend/                     # Python application and workflow package
+│   ├── api.py                   # FastAPI job, approval, and persistence boundary
+│   ├── app.py                   # Gradio UI and review orchestration adapter
+│   ├── combined_server.py       # Uvicorn app joining FastAPI and Gradio
+│   ├── graph.py                 # LangGraph workflow and checkpointing
+│   ├── main.py                  # Click CLI — review / doctor / auth / config
+│   ├── state.py                 # Typed Pydantic workflow state
+│   ├── observability.py         # LangSmith/Langfuse, cost and health helpers
+│   └── integrations/            # GitHub auth, config, providers, and endpoints
+│       ├── auth.py
+│       ├── config.py
+│       ├── endpoints.py
+│       ├── github_client.py
+│       └── llm_factory.py
+├── nodes/                       # One module per LangGraph step
+├── prompts/                     # Versioned reviewer prompts
+├── eval_data/                   # Offline and RAGAS evaluation tools/data
+├── tests/                       # Unit and integration-style tests
+├── scripts/                     # Health alert tooling
+├── frontend/                    # React/Vite site deployed on Vercel
+├── supabase/migrations/         # Database schema migrations
+├── Dockerfile, Dockerfile.api   # Backend container definitions
 ├── docker-compose.yml
-├── docker-entrypoint.sh         # Fixes vector-store volume perms, drops to appuser
-├── nodes/                       # One module per graph node
-│   ├── ingestion.py             #   Fetch PR data from GitHub
-│   ├── retrieval.py             #   ChromaDB vector store + diff query
-│   ├── correctness_reviewer.py  #   LLM: logic & correctness issues
-│   ├── security_reviewer.py     #   LLM: security vulnerabilities
-│   ├── test_coverage_reviewer.py#   LLM: test-coverage gaps
-│   ├── aggregator.py            #   Dedupe, filter, verdict
-│   ├── human_approval.py        #   interrupt() — human-in-the-loop gate
-│   └── executor.py              #   Post inline comments to GitHub
-├── prompts/                     # Versioned system prompts (correctness/security/…_v1.txt)
-├── eval_data/                   # Evaluation harness
-│   ├── fetcher.py               #   Build ground-truth dataset (prs.jsonl)
-│   ├── evaluate.py              #   Precision/recall/F1 vs human comments
-│   ├── ragas_eval.py            #   RAGAS retrieval & generation metrics
-│   ├── prs.jsonl                #   Ground-truth dataset
-│   └── eval_results.json        #   Latest evaluation results
-├── scripts/
-│   └── alert.py                 # Smoke-test alert monitor (Discord/Slack)
-└── .github/workflows/
-    ├── alert.yml                # Every-6h smoke-test alert
-    └── deploy-hf.yml            # Deploy to Hugging Face Spaces on push to main
+├── docker-entrypoint.sh
+├── requirements.txt
+└── .github/workflows/           # Deployment and scheduled health checks
 ```
+
+Supporting documentation is indexed in [`docs/README.md`](docs/README.md).
+
+The root Python entry points remain as compatibility shims. Existing commands
+such as `python main.py`, `python app.py`, and `uvicorn combined_server:app`
+continue to work while the implementation lives under `backend/`.
 
 ---
 
 ## 🧪 Testing
 
-There are no unit-test files yet — the built-in verification paths are:
+The `tests/` directory contains focused checks for scheduling, finding
+grounding, ingestion, reviewer runtime, and evaluation behavior. Install
+`pytest` in the development environment if it is not already present, then run:
 
 ```bash
-# Smoke test: compiles the graph, runs it on synthetic data, and verifies the
-# interrupt/resume round-trip (assertions included)
+python -m pytest
+```
+
+Additional application checks include:
+
+```bash
+# Smoke test: runs the graph on synthetic data and verifies interrupt/resume
 python main.py review --smoke
 
 # Doctor: checks env, keys, and connectivity

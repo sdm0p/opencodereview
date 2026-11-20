@@ -18,10 +18,10 @@ from fastapi import HTTPException
 
 
 def test_incomplete_review_never_starts_ragas():
-    tree = ast.parse(Path('app.py').read_text(encoding='utf-8'))
+    tree = ast.parse(Path('backend/app.py').read_text(encoding='utf-8'))
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_ragas_inputs_from_state')
     ns = {}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), 'app.py', 'exec'), ns)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), 'backend/app.py', 'exec'), ns)
     state = SimpleNamespace(values={'verdict': SimpleNamespace(recommendation='incomplete'), 'diff': 'change'})
     assert ns['_ragas_inputs_from_state'](state, 'custom') is None
 
@@ -47,12 +47,12 @@ def test_public_job_never_exposes_evaluator_endpoint_snapshot():
 
 
 def scheduler():
-    tree = ast.parse(Path('api.py').read_text(encoding='utf-8'))
+    tree = ast.parse(Path('backend/api.py').read_text(encoding='utf-8'))
     names = {'create_review', 'cancel_review', '_public_job', 'get_review', 'decide_review', 'finding_feedback'}
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     for node in nodes:
         node.decorator_list = []
-    ns = dict(__file__=str(Path('api.py').resolve()), Path=Path, Any=Any, Request=object, ReviewRequest=object,
+    ns = dict(__file__=str(Path('backend/api.py').resolve()), Path=Path, Any=Any, Request=object, ReviewRequest=object,
               Header=lambda *a, **k: None, DecisionRequest=object, FindingFeedbackRequest=object, HTTPException=HTTPException, hashlib=hashlib, json=json,
               threading=threading, time=time, uuid=uuid, datetime=datetime, timezone=timezone,
               os=SimpleNamespace(getenv=lambda *a: ''), requests=SimpleNamespace(get=Mock()),
@@ -61,7 +61,7 @@ def scheduler():
               _session=lambda request: {'github_id': request.owner}, _with_ragas=lambda job: dict(job))
     ns['requests'].RequestException = RuntimeError
     ns['requests'].get.return_value.json.return_value = {'head': {'sha': 'a'*40}, 'base': {'sha': 'b'*40}}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'api.py', 'exec'), ns)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'backend/api.py', 'exec'), ns)
     return ns
 
 

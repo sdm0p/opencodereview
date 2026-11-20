@@ -7,8 +7,8 @@ from typing import Optional
 
 import requests
 
-from github_client import GitHubSession, resolve_token
-from state import ChangedFile, OpenCodeReviewState
+from backend.integrations.github_client import GitHubSession, resolve_token
+from backend.state import ChangedFile, OpenCodeReviewState
 
 
 logger = logging.getLogger(__name__)

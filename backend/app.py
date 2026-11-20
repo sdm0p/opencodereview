@@ -1,0 +1,1962 @@
+#!/usr/bin/env python3
+"""OpenCodeReview — Gradio Web UI for Hugging Face Spaces.
+
+Run locally:
+    python app.py
+
+On Hugging Face Spaces:
+    The combined server mounts this UI alongside the FastAPI application.
+    Set GROQ_API_KEY (and optionally GITHUB_TOKEN) as Space secrets.
+"""
+
+from __future__ import annotations
+
+import html
+from contextvars import copy_context
+import json
+import ipaddress
+import logging
+import os
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+import gradio as gr
+from langgraph.types import Command
+
+from backend.graph import build_graph
+from backend.main import NODE_LABELS, _cleanup_db, SYNTHETIC_STATE
+from backend.observability import (
+    build_run_metadata,
+    enable_langsmith,
+    get_langfuse_handler,
+    is_langfuse_enabled,
+    is_langsmith_enabled,
+    estimate_groq_cost,
+    flush_langfuse,
+    format_cost,
+    langfuse_trace,
+    log_error_to_backends,
+    log_langfuse_score,
+    _resolve_langfuse_trace_id,
+    HealthStatus,
+    TokenCostCallback,
+    check_groq_connectivity,
+    check_langfuse_connectivity,
+)
+from backend.integrations.endpoints import (
+    EndpointConfig,
+    clear_session_endpoints,
+    discover_endpoints,
+    dropdown_choices,
+    register_endpoint,
+    session_endpoints,
+)
+from backend.state import Verdict
+
+import subprocess
+from datetime import datetime, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Set this to a mounted volume or durable filesystem path in hosted
+# deployments. The default keeps local development self-contained.
+DB_PATH = os.environ.get("OPENCODEREVIEW_DB_PATH", "checkpoints.db")
+
+SEVERITY_COLORS = {
+    "critical": "#dc2626",
+    "high": "#ea580c",
+    "medium": "#ca8a04",
+    "low": "#16a34a",
+    "info": "#2563eb",
+}
+
+RECOMMENDATION_ICONS = {
+    "approve": "✅",
+    "request_changes": "🔄",
+    "block": "🚫",
+    "comment": "💬",
+}
+
+# Default dropdown choice shown in the UI.  Gradio 6's Dropdown has no
+# placeholder support, so a real choice is displayed and mapped back to
+# the "" (auto) sentinel wherever the value enters the pipeline.
+AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq fallback)"
+
+
+def _normalize_endpoint_name(endpoint_name: str | None) -> str:
+    return "" if endpoint_name == AUTO_ENDPOINT_CHOICE else (endpoint_name or "")
+
+
+# ─── Orchestration ───────────────────────────────────────────────────────────
+
+
+def _init_observability_ui() -> None:
+    """Initialise observability backends and HTTP cache for the Gradio UI."""
+    from backend.integrations.github_client import _init_cache as _init_http_cache
+    _init_http_cache()
+
+    # LangSmith: enable if key is in environment (check both modern and legacy names)
+    ls_key = (
+        os.environ.get("LANGSMITH_API_KEY", "").strip()
+        or os.environ.get("LANGCHAIN_API_KEY", "").strip()
+    )
+    if ls_key:
+        project = os.environ.get("LANGSMITH_PROJECT",
+                    os.environ.get("LANGCHAIN_PROJECT", "opencodereview"))
+        enable_langsmith(ls_key, project)
+        logger.info("Observability: LangSmith enabled for Gradio UI")
+    if get_langfuse_handler():
+        logger.info("Observability: Langfuse enabled for Gradio UI")
+
+
+def _build_and_stream(
+    repo: str,
+    pr_number: int,
+    endpoint_name: str = "",
+    ragas_background: bool = False,
+    ragas_result_callback=None,
+    progress_callback=None,
+    review_mode: str = "thorough",
+    baseline_sha: str | None = None,
+) -> tuple:
+    """Build the graph, stream up to the interrupt, and return state + config.
+
+    Parameters
+    ----------
+    endpoint_name : str
+        Optional name of a configured custom LLM endpoint
+        (``OCR_ENDPOINT_*``).  Empty string uses the built-in provider.
+    ragas_background : bool
+        When True, RAGAS scoring runs on a background daemon thread and the
+        fourth return element is a task id (str) to poll instead of the
+        scores dict — so the UI can show results immediately.
+    """
+    graph = build_graph(DB_PATH)
+    thread_id = str(uuid.uuid4())
+    trace_name = f"opencodereview/review/{repo}#{pr_number}"
+    tags = ["gradio_ui", repo]
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    cost_tracker = TokenCostCallback()
+    metadata = build_run_metadata(
+        source="gradio_ui", repo=repo, pr_number=pr_number,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
+    )
+    config: dict = {
+        "configurable": {"thread_id": f"web-{thread_id}"},
+        "metadata": metadata,
+    }
+
+    # Use langfuse_trace context manager which sets trace metadata via
+    # propagate_attributes() (langfuse v4+ API) and yields the handler.
+    with langfuse_trace(
+        trace_name=trace_name,
+        tags=tags,
+        session_id=thread_id,
+        metadata={
+            "source": "gradio_ui",
+            "repo": repo,
+            "pr_number": pr_number,
+            "prompt_versions": prompt_versions,
+        },
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
+
+        try:
+            t0 = time.time()
+            initial = {"repo": repo, "pr_number": pr_number, "review_mode": review_mode, "incremental_base_sha": baseline_sha or ""}
+            if endpoint_name:
+                initial["endpoint"] = endpoint_name
+            for event in graph.stream(initial, config):
+                for node_name in event:
+                    label = NODE_LABELS.get(node_name, node_name)
+                    logger.info("  ✔ %s  (+%.1fs)", label, time.time() - t0)
+                    if progress_callback:
+                        progress_callback(node_name, time.time() - t0, event.get(node_name))
+            logger.info("  ─── Pipeline complete in %.1fs ───", time.time() - t0)
+        except Exception as exc:
+            log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "stream", "repo": repo, "pr_number": pr_number})
+            conn = getattr(graph, "_opencodereview_conn", None)
+            if conn:
+                conn.close()
+            flush_langfuse()
+            raise
+
+        state = graph.get_state(config)
+
+        # ── Log verdict/findings scores and capture trace_id ───────
+        # Capture trace_id NOW (immediately after graph completes)
+        # so it can be used after the long-running RAGAS computation.
+        # _resolve_langfuse_trace_id() can return None after ~60s delays
+        # because contextvars may be lost.
+        run_trace_id = _resolve_langfuse_trace_id(handler)
+
+        verdict = state.values.get("verdict")
+        findings = state.values.get("final_findings", [])
+        if verdict and verdict.overall_score is not None:
+            log_langfuse_score(
+                name="verdict_score",
+                value=verdict.overall_score,
+                comment=f"{repo}#{pr_number} — {verdict.recommendation}: {verdict.summary[:100]}",
+                trace_id=run_trace_id,
+                handler=handler,
+            )
+            log_langfuse_score(
+                name="findings_count",
+                value=len(findings),
+                comment=f"{repo}#{pr_number}",
+                trace_id=run_trace_id,
+                handler=handler,
+            )
+
+        # ── Compute and log RAGAS retrieval scores ─────────────────
+        # Background mode spawns a thread and returns a task id so the UI
+        # can render results immediately; sync mode (CLI/health) waits.
+        ragas_out: dict[str, float | None] | str = {}
+        ragas_inputs = _ragas_inputs_from_state(state, endpoint_name)
+        if ragas_inputs:
+            if ragas_background:
+                # handler is not shared across threads (langfuse contextvars
+                # are lost in the worker); the captured trace_id is passed
+                # explicitly instead.
+                ragas_out = _spawn_ragas_background(
+                    ragas_inputs, repo, pr_number, run_trace_id, None,
+                    ragas_result_callback,
+                )
+            else:
+                ragas_out = _compute_and_log_ragas(
+                    ragas_inputs, repo, pr_number, run_trace_id, handler,
+                )
+
+    # Close the checkpointer connection (checkpoints persist to disk so the
+    # resume path opens a fresh one) and ship any queued Langfuse scores.
+    conn = getattr(graph, "_opencodereview_conn", None)
+    if conn:
+        conn.close()
+    flush_langfuse()
+
+    config.setdefault("metadata", {})["cost_details"] = cost_tracker.details()
+    return state, config, cost_tracker.summary(), ragas_out, ({**ragas_inputs, "endpoint": None} if ragas_inputs else None)
+
+
+def _format_findings_table(findings: list) -> str:
+    """Build an HTML table of findings with severity-coloured badges."""
+    if not findings:
+        return '<p style="color:var(--text-muted)">No issues found.</p>'
+
+    rows: list[str] = []
+    for f in findings:
+        color = SEVERITY_COLORS.get(f.severity.value, "#666")
+        severity = html.escape(f.severity.value.upper())
+        category = html.escape(str(f.category))
+        location = html.escape(f"{f.file_path}:{f.line_start}–{f.line_end}")
+        comment = html.escape(str(f.comment))
+        rows.append(
+            f"<tr>"
+            f'<td><span style="display:inline-block;padding:2px 10px;'
+            f'border-radius:12px;background:{color}22;'
+            f'color:{color};font-weight:700;font-size:0.85em">'
+             f"{severity}</span></td>"
+             f"<td>{category}</td>"
+             f"<td><code>{location}</code></td>"
+             f"<td>{comment}</td>"
+            f'<td style="text-align:center">{f.confidence:.0%}</td>'
+            f"</tr>"
+        )
+
+    return (
+        '<div style="overflow-x:auto">'
+        '<table style="width:100%;border-collapse:collapse;font-size:0.9em">'
+        "<thead>"
+        f'<tr style="background:var(--bg-table-header);border-bottom:2px solid var(--border-color)">'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Severity</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Category</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Location</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Comment</th>'
+        '<th style="padding:10px 12px;text-align:left;color:var(--text-primary)">Confidence</th>'
+        "</tr>"
+        "</thead>"
+        f'<tbody style="color:var(--text-secondary)">' + "".join(rows) + "</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
+def _format_verdict(verdict: Verdict | None) -> str:
+    """Build a verdict summary card with a score bar and severity chips."""
+    if verdict is None:
+        return '<p class="muted">No verdict produced.</p>'
+
+    icon = RECOMMENDATION_ICONS.get(verdict.recommendation, "📋")
+    color = (
+        "#16a34a" if verdict.recommendation == "approve"
+        else "#dc2626" if verdict.recommendation == "block"
+        else "#ea580c"
+    )
+    pct = max(0, min(100, int((verdict.overall_score or 0) * 10)))
+    score_label = f"{verdict.overall_score:.1f}/10" if verdict.overall_score is not None else "Not scored"
+
+    chips = []
+    if verdict.critical_count:
+        chips.append(
+            f'<span class="sev-chip" style="color:#dc2626;border-color:#dc262644;background:#dc262611">'
+            f"critical × {verdict.critical_count}</span>"
+        )
+    if verdict.high_count:
+        chips.append(
+            f'<span class="sev-chip" style="color:#ea580c;border-color:#ea580c44;background:#ea580c11">'
+            f"high × {verdict.high_count}</span>"
+        )
+    chips_html = (
+        f'<div class="chips-row" style="margin-top:10px">' + "".join(chips) + "</div>"
+        if chips else ""
+    )
+
+    return (
+        '<div class="ocr-card verdict-card" '
+        f'style="border-left-color:{color}">'
+        '<div class="verdict-head">'
+        f'<span class="verdict-icon">{icon}</span>'
+        f'<span class="verdict-reco" style="color:{color}">{verdict.recommendation.upper()}</span>'
+        f'<span class="verdict-score">Score <b>{score_label}</b></span>'
+        "</div>"
+        f'<div class="score-track"><div class="score-fill" style="width:{pct}%;background:{color}"></div></div>'
+        f'<p class="verdict-summary">{html.escape(str(verdict.summary))}</p>'
+        + chips_html
+        + "</div>"
+    )
+
+
+RAGAS_METRIC_LABELS = {
+    "context_precision": "Context Precision",
+    "context_recall": "Context Recall",
+    "faithfulness": "Faithfulness",
+    "answer_relevancy": "Answer Relevancy",
+    "mmr": "Mean Reciprocal Rank",
+}
+
+RAGAS_METRIC_TOOLTIPS = {
+    "context_precision": "Are the most relevant code chunks ranked first?",
+    "context_recall": "Did we find ALL the relevant code? (requires ground truth)",
+    "faithfulness": "Does the review answer stick to the retrieved code?",
+    "answer_relevancy": "Does the review address the PR diff?",
+    "mmr": "How early in the list does the first useful chunk appear?",
+}
+
+
+def _format_ragas_scores(scores: dict[str, float | None]) -> str:
+    """Build an HTML card showing RAGAS retrieval quality metrics."""
+    if not scores:
+        return ""
+
+    def _score_color(val: float) -> str:
+        if val >= 0.8:
+            return "#16a34a"
+        elif val >= 0.5:
+            return "#ca8a04"
+        else:
+            return "#dc2626"
+
+    rows: list[str] = []
+    failed = 0
+    for key, value in scores.items():
+        label = RAGAS_METRIC_LABELS.get(key, key.replace("_", " ").title())
+        tooltip = RAGAS_METRIC_TOOLTIPS.get(key, "")
+        tip_html = (
+            f'<span class="tip" title="{tooltip}">ℹ️</span>' if tooltip else ""
+        )
+        if value is None:
+            failed += 1
+            rows.append(
+                f'<div class="metric-row">'
+                f'<span class="metric-label">{label} {tip_html}</span>'
+                f'<span class="metric-value muted">N/A — failed</span>'
+                f"</div>"
+            )
+            continue
+        color = _score_color(value)
+        pct = int(value * 100)
+        rows.append(
+            f'<div class="metric-row">'
+            f'<span class="metric-label">{label} {tip_html}</span>'
+            f'<span class="metric-value" style="color:{color}">{value:.3f}</span>'
+            f"</div>"
+            f'<div class="metric-track"><div class="metric-fill" style="width:{pct}%;background:{color}"></div></div>'
+        )
+
+    note = ""
+    if failed:
+        note = (
+            '<p class="muted small" style="margin:10px 0 0">'
+            f"{failed} metric(s) failed (likely LLM rate-limited) and are shown as N/A."
+            "</p>"
+        )
+
+    return (
+        '<div class="ocr-card">'
+        '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+        + "".join(rows)
+        + note
+        + "</div>"
+    )
+
+
+RAGAS_PENDING_HTML = (
+    '<div class="ocr-card">'
+    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+    '<div class="loading-spinner" style="justify-content:flex-start;padding:10px 0">'
+    '<div class="spinner"></div>'
+    '<span class="label">Computing RAGAS scores in the background…</span>'
+    "</div>"
+    "</div>"
+)
+
+RAGAS_FAILED_HTML = (
+    '<div class="ocr-card">'
+    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
+    '<p class="muted small">N/A — RAGAS scoring failed '
+    "(likely LLM rate-limited or timed out). Check the logs for details.</p>"
+    "</div>"
+)
+
+# After this long a background RAGAS task is considered stalled and the
+# placeholder is replaced with the failure card instead of spinning forever.
+RAGAS_TIMEOUT_SECONDS = 600
+
+# Background RAGAS task registry: the UI spawns scoring on a daemon thread
+# and a gr.Timer polls this dict, so review results render immediately
+# instead of waiting minutes for the RAGAS LLM calls.
+_ragas_tasks: dict[str, dict] = {}
+_ragas_lock = threading.Lock()
+
+
+def _ragas_inputs_from_state(state, endpoint_name: str) -> dict | None:
+    """Extract the inputs RAGAS needs from the finished graph state."""
+    verdict = state.values.get("verdict")
+    if verdict and verdict.recommendation == "incomplete":
+        return None
+    context_chunks = state.values.get("context_chunks", [])
+    query = state.values.get("diff", "") or ""
+    if not query:
+        changed = state.values.get("changed_files", [])
+        paths = [getattr(item, "path", "") for item in changed if getattr(item, "path", "")]
+        query = "Review changed files: " + ", ".join(paths) if paths else "Review the pull request changes"
+    contexts = [c.content for c in context_chunks if c.content]
+    # When vector retrieval is disabled on a small host, evaluate against the
+    # PR diff itself. This preserves a grounded context for RAGAS instead of
+    # silently dropping quality measurement altogether.
+    if not contexts and query:
+        contexts = [query]
+    if not contexts:
+        return None
+
+    # Build answer text from findings + verdict for
+    # faithfulness & answer_relevancy metrics
+    answer_lines = []
+    for f in state.values.get("final_findings", []):
+        answer_lines.append(
+            f"[{f.severity.value}] {f.file_path}:{f.line_start}-{f.line_end}: {f.comment}"
+        )
+    if state.values.get("verdict"):
+        v = state.values["verdict"]
+        answer_lines.append(
+            f"Verdict: {v.recommendation} (score={v.overall_score}/10) — {v.summary}"
+        )
+    answer_text = "\n".join(answer_lines) if answer_lines else None
+    return {
+        "query": query,
+        "context_source": "retrieved_context" if context_chunks else "pr_diff_proxy",
+        "contexts": contexts,
+        "answer": answer_text,
+        "endpoint": __import__("endpoints").get_endpoint(endpoint_name) if endpoint_name else None,
+    }
+
+
+def _compute_and_log_ragas(
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+    progress_callback=None,
+) -> dict[str, float | None]:
+    """Compute RAGAS scores and log them to Langfuse. Never raises."""
+    scores: dict[str, float | None] = {}
+    try:
+        from eval_data.ragas_eval import compute_ragas_report
+
+        report = compute_ragas_report(
+            query=inputs["query"],
+            retrieved_contexts=inputs["contexts"],
+            answer=inputs["answer"],
+            endpoint=inputs["endpoint"],
+            progress_callback=progress_callback,
+        )
+        scores = report["scores"]
+        if progress_callback:
+            progress_callback(report)
+        for metric_name, value in scores.items():
+            if value is None:
+                continue
+            log_langfuse_score(
+                name=f"ragas_{metric_name}",
+                value=value,
+                comment=f"{repo}#{pr_number} — {metric_name}",
+                trace_id=run_trace_id,
+                handler=handler,
+            )
+        logger.info(
+            "RAGAS scores logged to Langfuse: %s",
+            " | ".join(
+                f"{k}={v:.4f}" for k, v in scores.items() if v is not None
+            ),
+        )
+    except ImportError:
+        logger.info("RAGAS not installed — skipping RAGAS scoring (pip install ragas)")
+    except Exception as exc:
+        logger.warning("RAGAS scoring failed: %s", exc)
+    return scores
+
+
+def _ragas_worker(
+    task_id: str,
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+    result_callback=None,
+) -> None:
+    """Daemon thread body: compute scores, stash them for the Timer poll."""
+    timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30"))
+    def report_progress(report):
+        with _ragas_lock:
+            entry = _ragas_tasks.get(task_id)
+            if entry is not None:
+                entry["metrics"] = dict(report.get("metrics", {}))
+                entry["evaluation"] = {**report.get("evaluation", {}), "context_source": inputs.get("context_source", "retrieved_context")}
+                entry["scores"] = dict(report.get("scores", {}))
+    with _ragas_lock:
+        if task_id in _ragas_tasks:
+            _ragas_tasks[task_id]["timeout_seconds"] = timeout
+    try:
+        # The provider call may block on a network timeout. Keep the task
+        # terminal and observable even when the provider does not return.
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ragas-call")
+        future = pool.submit(
+            copy_context().run,
+            _compute_and_log_ragas,
+            inputs,
+            repo,
+            pr_number,
+            run_trace_id,
+            handler,
+            report_progress,
+        )
+        try:
+            scores = future.result(timeout=timeout)
+        except FutureTimeoutError:
+            with _ragas_lock:
+                entry = _ragas_tasks.get(task_id)
+                scores = dict((entry or {}).get("scores") or {})
+                if entry is not None:
+                    entry["error"] = f"RAGAS exceeded {int(timeout)} second timeout"
+                    entry["done"] = True
+            if result_callback:
+                result_callback(scores, f"RAGAS exceeded {int(timeout)} second timeout")
+            pool.shutdown(wait=False, cancel_futures=True)
+            return
+        else:
+            pool.shutdown(wait=True)
+    except Exception as exc:
+        logger.warning("RAGAS worker failed: %s", exc)
+        with _ragas_lock:
+            entry = _ragas_tasks.get(task_id)
+            if entry is not None:
+                entry["error"] = str(exc)[:500]
+                entry["done"] = True
+        if result_callback:
+            result_callback({}, str(exc)[:500])
+        return
+    with _ragas_lock:
+        entry = _ragas_tasks.get(task_id)
+        if entry is not None:
+            entry["scores"] = scores or {}
+            entry["done"] = True
+    if result_callback:
+        result_callback(scores or {}, None)
+    # Ship the Langfuse scores logged from this thread.
+    flush_langfuse()
+
+
+def _spawn_ragas_background(
+    inputs: dict,
+    repo: str,
+    pr_number: int,
+    run_trace_id: str | None,
+    handler,
+    result_callback=None,
+) -> str:
+    """Start RAGAS scoring on a daemon thread; return a task id to poll."""
+    task_id = f"ragas-{uuid.uuid4().hex[:12]}"
+    with _ragas_lock:
+        _ragas_tasks[task_id] = {"done": False, "scores": None, "started": time.time()}
+        if len(_ragas_tasks) > 64:
+            # Drop oldest finished entries to bound memory.
+            for old_id in list(_ragas_tasks):
+                if _ragas_tasks[old_id].get("done"):
+                    del _ragas_tasks[old_id]
+                if len(_ragas_tasks) <= 64:
+                    break
+    threading.Thread(
+        target=copy_context().run,
+        args=(_ragas_worker, task_id, inputs, repo, pr_number, run_trace_id, handler, result_callback),
+        name=f"ragas-{task_id}",
+        daemon=True,
+    ).start()
+    return task_id
+
+
+def _format_findings_count(findings: list) -> str:
+    """Build a compact summary count per severity as pill chips."""
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f.severity.value] = counts.get(f.severity.value, 0) + 1
+
+    parts = []
+    for sev in ("critical", "high", "medium", "low", "info"):
+        if counts.get(sev, 0) > 0:
+            color = SEVERITY_COLORS.get(sev, "#666")
+            parts.append(
+                f'<span class="sev-chip" style="color:{color};border-color:{color}44;background:{color}11">'
+                f"{sev} × {counts[sev]}</span>"
+            )
+    return (
+        '<div class="chips-row">'
+        + ("".join(parts) if parts else '<span class="muted">No issues</span>')
+        + "</div>"
+    )
+
+
+def _format_run_summary(
+    repo: str, pr_number: int, endpoint_name: str, duration: float, cost_summary: str | dict
+) -> str:
+    """Build a compact run-summary card shown above the results."""
+    endpoint_display = html.escape(endpoint_name or "built-in default")
+    cost_text = cost_summary if isinstance(cost_summary, str) else str(cost_summary)
+    return (
+        '<div class="ocr-card" style="margin-top:12px">'
+        '<div class="run-summary">'
+        f'<span>📦 <b>{html.escape(repo)}</b>#{pr_number}</span>'
+        f'<span>🤖 <b>{endpoint_display}</b></span>'
+        f'<span>⏱️ <b>{duration:.1f}s</b></span>'
+        f'<span>💰 {html.escape(cost_text)}</span>'
+        "</div>"
+        "</div>"
+    )
+
+
+def _format_session_endpoints() -> str:
+    """Render cards for endpoints added at runtime via the UI form."""
+    eps = session_endpoints()
+    if not eps:
+        return (
+            '<p class="muted small">No endpoints added in this session yet — '
+            "fill the form above and click <b>Save &amp; use endpoint</b>.</p>"
+        )
+    cards = "".join(
+        f'<div class="endpoint-card">'
+        f'<div class="endpoint-name">{html.escape(ep.name)}'
+        f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
+        f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+        f' · {html.escape(ep.base_url or "default URL")} · key {ep.masked_key}</div>'
+        f'</div>'
+        for ep in eps
+    )
+    return (
+        f'<div class="card-title" style="margin:6px 0 6px">'
+        f'Added in this session ({len(eps)})</div><div>{cards}</div>'
+    )
+
+
+def _probe_endpoint(ep) -> tuple[bool, str]:
+    """Probe an endpoint and report whether it can serve the pipeline.
+
+    HTTP status codes are classified so a 401/403 is reported as
+    "reachable but the server rejected the key" instead of a misleading
+    "unreachable".  OpenAI-compatible servers that don't implement
+    ``GET /models`` (many vLLM / proxy deployments) fall back to a
+    minimal ``/chat/completions`` call — the real request the pipeline
+    makes — so a blocked /models endpoint no longer looks broken.
+    """
+    import urllib.error as _ur_err
+    import urllib.request as _ur
+    from urllib.parse import urlsplit
+
+    def _safe_base_url(raw_url: str | None, default: str) -> tuple[str | None, str | None]:
+        """Allow only public HTTP(S) endpoints; never forward keys to private hosts."""
+        value = (raw_url or default).strip().rstrip("/")
+        try:
+            parsed = urlsplit(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                return None, "base URL must use http(s) and include a hostname"
+            if parsed.username or parsed.password:
+                return None, "base URL must not contain embedded credentials"
+            addresses = {item[4][0] for item in __import__("socket").getaddrinfo(parsed.hostname, parsed.port, type=__import__("socket").SOCK_STREAM)}
+            for address in addresses:
+                ip = ipaddress.ip_address(address)
+                if not ip.is_global:
+                    return None, "base URL resolves to a private or otherwise non-public address"
+        except Exception as exc:
+            return None, f"invalid or unresolvable base URL: {type(exc).__name__}"
+        return value, None
+
+    class _NoRedirect(_ur.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    _opener = _ur.build_opener(_NoRedirect)
+
+    def _open(req):
+        return _opener.open(req, timeout=15)
+
+    if ep.provider == "google":
+        try:
+            from google import genai
+            client = genai.Client(api_key=ep.api_key)
+            list(client.models.list())
+            return True, "models.list OK"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"[:140]
+
+    def _auth_rejected(exc: _ur_err.HTTPError) -> str:
+        return (
+            f"endpoint is reachable but the server rejected the API key "
+            f"(HTTP {exc.code}) — check the key and auth type"
+        )
+
+    # ── Anthropic ────────────────────────────────────────────────
+    if ep.provider == "anthropic":
+        base, error = _safe_base_url(ep.base_url, "https://api.anthropic.com/v1")
+        if error:
+            return False, error
+        candidates = [f"{base}/models"]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1/models")
+        last_err = "no models endpoint responded"
+        for url in candidates:
+            try:
+                req = _ur.Request(
+                    url,
+                    headers={
+                        "x-api-key": ep.api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                )
+                with _open(req) as resp:
+                    if resp.status == 200:
+                        return True, f"HTTP 200 · {url}"
+            except _ur_err.HTTPError as exc:
+                if exc.code in (401, 403):
+                    # Same key on every candidate — auth failure is final.
+                    return False, f"{_auth_rejected(exc)} ({url})"
+                hint = " — check base_url (should end in /v1)" if exc.code == 404 else ""
+                last_err = f"reachable but returned HTTP {exc.code} ({url}){hint}"
+            except Exception as exc:
+                return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
+        return False, last_err
+
+    # ── OpenAI-compatible ────────────────────────────────────────
+    base, error = _safe_base_url(ep.base_url, "https://api.openai.com/v1")
+    if error:
+        return False, error
+    candidates = [f"{base}/models"]
+    if not base.endswith("/v1"):
+        candidates.append(f"{base}/v1/models")
+
+    for url in candidates:
+        try:
+            req = _ur.Request(
+                url, headers={"Authorization": f"Bearer {ep.api_key}"}
+            )
+            with _open(req) as resp:
+                if resp.status == 200:
+                    return True, f"HTTP 200 · {url}"
+        except _ur_err.HTTPError as exc:
+            if exc.code in (401, 403):
+                # Bad key on /models means chat would fail the same way.
+                return False, f"{_auth_rejected(exc)} ({url})"
+        except Exception as exc:
+            # Genuinely unreachable — chat probe below would only repeat it.
+            return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
+
+    # /models missing or blocked (404/405/501…) — probe the real call.
+    try:
+        payload = json.dumps({
+            "model": ep.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }).encode()
+        chat_url = f"{base}/chat/completions"
+        req = _ur.Request(
+            chat_url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {ep.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with _open(req) as resp:
+            if resp.status == 200:
+                return True, f"chat/completions OK · {chat_url}"
+            return False, f"reachable but returned HTTP {resp.status} (chat/completions)"
+    except _ur_err.HTTPError as exc:
+        if exc.code in (401, 403):
+            return False, f"{_auth_rejected(exc)} (chat/completions)"
+        hint = " — check base_url (should end in /v1)" if exc.code == 404 else ""
+        return False, f"reachable but returned HTTP {exc.code} (chat/completions){hint}"
+    except Exception as exc:
+        return False, f"unreachable — {type(exc).__name__}: {exc}"[:140]
+
+
+def test_endpoints() -> str:
+    """Probe every configured endpoint and render status cards.
+
+    Built-in providers (Gemini/Grok) whose key is not set are skipped with
+    a ``⏭️ key not set`` note instead of being probed (a probe would just
+    fail with 401 / an auth error).
+    """
+    eps = discover_endpoints()
+
+    cards = []
+    for ep in eps:
+        if ep.builtin and not ep.api_key:
+            cards.append(
+                f'<div class="endpoint-card">'
+                f'<div class="endpoint-name">{html.escape(ep.name)}'
+                f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
+                f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+                f' · {html.escape(ep.base_url or "default URL")} · key {html.escape(ep.masked_key)}</div>'
+                f'<div class="endpoint-meta" style="color:var(--text-muted);font-weight:700">'
+                f'⏭️ key not set (add GEMINI_API_KEY / GROQ_API_KEY)</div>'
+                f'</div>'
+            )
+            continue
+        ok, detail = _probe_endpoint(ep)
+        status_color = "#16a34a" if ok else "#dc2626"
+        cards.append(
+            f'<div class="endpoint-card">'
+            f'<div class="endpoint-name">{html.escape(ep.name)}'
+            f'<span class="endpoint-badge">{html.escape(ep.provider)}</span></div>'
+            f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+            f' · {html.escape(ep.base_url or "default URL")} · key {html.escape(ep.masked_key)}</div>'
+            f'<div class="endpoint-meta" style="color:{status_color};font-weight:700">'
+            f'{"✅" if ok else "❌"} {html.escape(detail)}</div>'
+            f'</div>'
+        )
+    return '<div>' + "".join(cards) + '</div>'
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _get_deploy_info() -> tuple[str, str]:
+    """Return Git commit hash and deploy timestamp for the footer."""
+    commit = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+    except Exception:
+        pass
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return commit, ts
+
+
+# ─── Gradio callbacks ───────────────────────────────────────────────────────
+
+
+# _prune_db replaced with direct _cleanup_db() calls below
+
+
+def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.Progress()):
+    """Run the review pipeline up to human-in-the-loop interrupt."""
+    if not repo or "/" not in repo:
+        yield [None, None, None, None, None, None], "❌ Enter a repo in `owner/name` format."
+        return
+
+    endpoint_name = _normalize_endpoint_name(endpoint_name)
+
+    # Fail fast on an unknown endpoint name (allow_custom_value lets any
+    # string through the dropdown; the reviewer nodes would otherwise
+    # swallow the ValueError and report a confusing empty review).
+    if endpoint_name:
+        from backend.integrations.endpoints import get_endpoint
+
+        ep = get_endpoint(endpoint_name)
+        if ep is None:
+            yield [None, None, None, None, None, None], (
+                f"❌ Endpoint '{endpoint_name}' not found — pick one from "
+                "the list or add it in the form above."
+            )
+            return
+        if ep.builtin and not ep.api_key:
+            key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
+            yield [None, None, None, None, None, None], (
+                f"❌ Endpoint '{ep.name}' is selected but its key is not set — "
+                f"add `{key_var}` as a Space secret, or add a custom endpoint "
+                "in the form above."
+            )
+            return
+
+    _cleanup_db()
+
+    progress(0.1, desc="Building graph…")
+
+    t0 = time.time()
+    try:
+        state, config, cost_summary, ragas_out, _ragas_inputs = _build_and_stream(
+            repo.strip(), int(pr_number), endpoint_name, ragas_background=True,
+        )
+    except Exception as exc:
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
+        yield ([None, None, None, None, None, None], f"❌ Review failed: {exc}")
+        return
+
+    duration = time.time() - t0
+
+    tasks = state.tasks
+    values = state.values
+
+    if not tasks:
+        yield [None, None, None, None, None, None], "ℹ️ Review completed without findings."
+        return
+
+    verdict: Verdict | None = values.get("verdict")
+    findings: list = values.get("final_findings", [])
+
+    progress(0.8, desc="Formatting results…")
+
+    verdict_html = _format_verdict(verdict)
+    if isinstance(ragas_out, str):
+        ragas_task_id = ragas_out
+        ragas_html = RAGAS_PENDING_HTML
+    else:
+        ragas_task_id = ""
+        ragas_html = _format_ragas_scores(ragas_out)
+    findings_html = _format_findings_table(findings)
+    count_html = _format_findings_count(findings)
+    # Strip non-serializable callbacks before saving config to state
+    config_json = json.dumps(
+        {k: v for k, v in config.items() if k != "callbacks"}
+    )
+
+    run_summary_html = _format_run_summary(
+        repo.strip(), pr_number, endpoint_name, duration, cost_summary,
+    )
+
+    yield (
+        [run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id],
+        None,
+    )
+
+
+def resume_review(config_json: str, action: str, progress=gr.Progress()):
+    """Resume the paused graph with approve/reject."""
+    if not config_json:
+        return "ℹ️ No pending review to resume. Run a review first."
+
+    try:
+        config = json.loads(config_json)
+        if not isinstance(config, dict):
+            raise ValueError("pending review state must be a JSON object")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return f"❌ Invalid pending review state: {html.escape(str(exc))}"
+    graph = build_graph(DB_PATH)
+    handler = get_langfuse_handler()
+    cost_tracker = TokenCostCallback()
+    callbacks = [cost_tracker]
+    if handler:
+        callbacks.append(handler)
+    config.setdefault("callbacks", []).extend(callbacks)
+
+    progress(0.3, desc=f"Processing {action}…")
+
+    try:
+        graph.invoke(Command(resume={"action": action}), config)
+        final_state = graph.get_state(config)
+        approved = final_state.values.get("human_approved")
+        msg = (
+            f"✅ Review **approved**! Findings posted to GitHub."
+            if approved
+            else "❌ Review **rejected**. No comments posted."
+        )
+        if cost_tracker.usage:
+            msg += f" _{cost_tracker.summary()}_"
+    except Exception as exc:
+        log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "resume_review", "action": action})
+        msg = f"❌ Error: {exc}"
+    finally:
+        # Close the checkpointer connection and ship any queued scores.
+        conn = getattr(graph, "_opencodereview_conn", None)
+        if conn:
+            conn.close()
+        flush_langfuse()
+    return msg
+
+
+def run_smoke(progress=gr.Progress()):
+    """Run the synthetic smoke test."""
+    _cleanup_db()
+
+    progress(0.1, desc="Building graph…")
+    graph = build_graph(DB_PATH)
+    thread_id = str(uuid.uuid4())
+    prompt_versions = {
+        "correctness": "v1",
+        "security": "v1",
+        "test_coverage": "v1",
+        "aggregator": "v1",
+    }
+    cost_tracker = TokenCostCallback()
+    metadata = build_run_metadata(
+        source="gradio_ui", repo="demo-org/demo-repo", pr_number=1,
+        session_id=thread_id,
+        prompt_versions=prompt_versions,
+    )
+    config: dict = {
+        "configurable": {"thread_id": f"smoke-web-{thread_id}"},
+        "metadata": metadata,
+    }
+
+    progress(0.3, desc="Running on synthetic data…")
+    with langfuse_trace(
+        trace_name="opencodereview/smoke-test",
+        tags=["gradio_ui", "smoke", "demo-org/demo-repo"],
+        session_id=thread_id,
+        metadata={"prompt_versions": prompt_versions},
+    ) as handler:
+        callbacks = [cost_tracker]
+        if handler:
+            callbacks.append(handler)
+        config["callbacks"] = callbacks
+
+        try:
+            list(graph.stream(SYNTHETIC_STATE, config))
+        except Exception as exc:
+            log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "smoke_stream"})
+            logger.exception("Smoke test failed: %s", exc)
+            raise
+
+    state = graph.get_state(config)
+    tasks = state.tasks
+
+    # Close the checkpointer connection and ship any queued Langfuse scores.
+    conn = getattr(graph, "_opencodereview_conn", None)
+    if conn:
+        conn.close()
+    flush_langfuse()
+
+    if not tasks:
+        yield [None, None, None, None, None], "ℹ️ Smoke test completed without findings."
+        return
+
+    verdict: Verdict | None = state.values.get("verdict")
+    findings: list = state.values.get("final_findings", [])
+
+    progress(0.8, desc="Formatting…")
+    verdict_html = _format_verdict(verdict)
+    findings_html = _format_findings_table(findings)
+    # Strip non-serializable callbacks before saving config to state
+    config_json = json.dumps(
+        {k: v for k, v in config.items() if k != "callbacks"}
+    )
+    cost_html = f'<p style="margin-top:8px;font-size:0.85em;color:var(--text-muted)">{cost_tracker.summary()}</p>'
+
+    yield [verdict_html, findings_html + cost_html, config_json, verdict_html, findings_html], None
+
+
+# ─── UI ──────────────────────────────────────────────────────────────────────
+
+CSS = """
+/* ── CSS Custom Properties (light mode) ───────────────────────────── */
+:root {
+    --bg-page: #f1f5f9;
+    --bg-card: #ffffff;
+    --bg-card-alt: #f8fafc;
+    --bg-table-header: #f1f5f9;
+    --border-color: #e2e8f0;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --text-footer: #94a3b8;
+    --spinner-track: #e2e8f0;
+    --accent: #52525b;
+    --accent-soft: rgba(82, 82, 91, 0.10);
+    --glass: rgba(255, 255, 255, 0.55);
+    --glass-border: rgba(15, 23, 42, 0.10);
+    --glass-field: rgba(255, 255, 255, 0.72);
+    --glass-edge: rgba(15, 23, 42, 0.18);
+    --glass-hover: rgba(15, 23, 42, 0.05);
+    --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    --radius: 14px;
+    --shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 10px 30px rgba(15, 23, 42, 0.06);
+}
+
+/* ── Dark Mode — true black, glass surfaces, no blue ────────────── */
+body.dark {
+    --bg-page: #000000;
+    --bg-card: #0a0a0a;
+    --bg-card-alt: #101010;
+    --bg-table-header: #0a0a0a;
+    --border-color: #1f1f1f;
+    --text-primary: #f5f5f5;
+    --text-secondary: #d4d4d4;
+    --text-muted: #8a8a8a;
+    --text-footer: #5c5c5c;
+    --spinner-track: #1c1c1c;
+    --accent: #a1a1aa;
+    --accent-soft: rgba(255, 255, 255, 0.07);
+    --shadow: none;
+    --glass: rgba(255, 255, 255, 0.035);
+    --glass-border: rgba(255, 255, 255, 0.09);
+    --glass-field: rgba(255, 255, 255, 0.045);
+    --glass-edge: rgba(255, 255, 255, 0.12);
+    --glass-hover: rgba(255, 255, 255, 0.12);
+    --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+/* Glass buttons — replace Gradio's solid blue primary / gray secondary
+   with frosted neutral surfaces (scoped to the app area, not Gradio's
+   own footer controls). */
+.gradio-container main button.primary {
+    background: var(--glass-hover) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--glass-edge) !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(12px) !important;
+    transition: background 0.18s ease, border-color 0.18s ease !important;
+}
+.gradio-container main button.primary:hover {
+    background: var(--accent-soft) !important;
+    border-color: var(--text-muted) !important;
+}
+.gradio-container main button:not(.primary) {
+    background: var(--glass) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--glass-border) !important;
+    border-radius: 12px !important;
+    font-weight: 500 !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(10px) !important;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease !important;
+}
+.gradio-container main button:not(.primary):hover {
+    background: var(--glass-hover) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--glass-edge) !important;
+}
+/* Frosted input fields in both themes. */
+.gradio-container input, .gradio-container textarea, .gradio-container select {
+    background-color: var(--glass-field) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+/* Fill the dropdown wrapper so it reads as one glass field. */
+.gradio-container .glass-dropdown .wrap {
+    background-color: var(--glass-field) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+body.dark .gradio-container {
+    background: var(--bg-page) !important;
+}
+/* Blend Gradio's component panels into the page: no boxes, no
+   borders — only inputs keep a faint field tint so they stay legible. */
+body.dark .block,
+body.dark .form,
+body.dark .tabs,
+body.dark .tabitem {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+body.dark .tab-nav {
+    border-bottom: 1px solid var(--border-color) !important;
+    background: transparent !important;
+}
+body.dark input, body.dark textarea, body.dark select {
+    background-color: var(--glass-field) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--glass-edge) !important;
+    backdrop-filter: blur(8px);
+}
+body.dark .gradio-container .glass-dropdown .wrap {
+    color: var(--text-primary) !important;
+}
+body.dark label { color: var(--text-secondary) !important; }
+/* Field labels render as small pills in the Soft theme — restyle them
+   as quiet glass chips instead of the default saturated background. */
+label span[data-testid="block-info"],
+span.has-info,
+span[data-testid="block-info"] {
+    background: var(--glass) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--glass-border);
+    border-radius: 9px;
+    padding: 2px 10px;
+    font-weight: 500 !important;
+    backdrop-filter: blur(8px);
+    box-shadow: var(--glass-highlight);
+}
+body.dark button:not(.lg) { color: var(--text-primary) !important; }
+body.dark .footer { color: var(--text-footer) !important; }
+body.dark details summary { color: var(--text-secondary) !important; }
+body.dark [data-testid="block-info"] { color: var(--text-primary) !important; }
+
+/* ── Global ──────────────────────────────────────────────────────── */
+/* Component forms blend into the page in both themes; inputs keep
+   their own field background so they stay clearly interactive. */
+.gradio-container .form {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+.gradio-container {
+    background: radial-gradient(1200px 500px at 20% -10%, #eef2ff66, transparent 60%),
+                radial-gradient(1000px 400px at 90% 10%, #e0f2fe55, transparent 55%),
+                var(--bg-page) !important;
+}
+.gradio-container { max-width: 1024px; margin: 0 auto; }
+.footer { text-align: center; color: var(--text-footer); font-size: 0.85em; padding: 22px 0; }
+details { margin-top: 8px; }
+details summary { cursor: pointer; color: var(--text-secondary); font-weight: 500; }
+code { background: var(--bg-card-alt); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
+.muted { color: var(--text-muted) !important; }
+.small { font-size: 0.85em; }
+
+/* ── Hero ────────────────────────────────────────────────────────── */
+.hero { display: flex; align-items: center; gap: 16px; padding: 8px 0 4px; }
+.hero-icon {
+    font-size: 1.5em; width: 48px; height: 48px; display: flex; align-items: center;
+    justify-content: center; border-radius: 14px;
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-highlight);
+    backdrop-filter: blur(12px);
+}
+.hero-title { margin: 0; font-size: 1.35em; font-weight: 650; letter-spacing: -0.015em; color: var(--text-primary); }
+.hero-sub { margin: 2px 0 0; color: var(--text-muted); font-size: 0.95em; }
+
+/* ── Cards ───────────────────────────────────────────────────────── */
+.ocr-card {
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius); padding: 16px 20px; margin-top: 12px;
+    box-shadow: var(--glass-highlight);
+    backdrop-filter: blur(14px);
+}
+.card-title { font-weight: 600; color: var(--text-primary); margin-bottom: 12px; font-size: 1.0em; letter-spacing: 0.01em; }
+.chips-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* ── Chips / badges ──────────────────────────────────────────────── */
+.key-chip {
+    display: inline-block; padding: 3px 12px; border-radius: 999px;
+    font-size: 0.82em; font-weight: 500; border: 1px solid var(--glass-border);
+    background: var(--glass); color: var(--text-secondary);
+    backdrop-filter: blur(8px);
+}
+.key-chip.ok { color: #4ade80; border-color: rgba(74, 222, 128, 0.25); background: rgba(74, 222, 128, 0.07); }
+.sev-chip {
+    display: inline-block; padding: 3px 12px; border-radius: 999px;
+    font-size: 0.82em; font-weight: 600; border: 1px solid var(--glass-border);
+    background: var(--glass);
+}
+
+/* ── Endpoint cards ──────────────────────────────────────────────── */
+.endpoint-card {
+    border: 1px solid var(--glass-border); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 8px; background: var(--glass);
+    backdrop-filter: blur(10px);
+}
+.endpoint-name { font-weight: 600; color: var(--text-primary); display: flex; gap: 8px; align-items: center; }
+.endpoint-badge {
+    font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 2px 8px; border-radius: 999px; color: var(--text-muted);
+    background: var(--accent-soft); border: 1px solid var(--glass-border);
+}
+.endpoint-meta { margin-top: 4px; font-size: 0.88em; color: var(--text-secondary); }
+
+/* ── Run summary ─────────────────────────────────────────────────── */
+.run-summary { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; font-size: 0.92em; color: var(--text-secondary); }
+.run-summary b { color: var(--text-primary); }
+
+/* ── Verdict ─────────────────────────────────────────────────────── */
+.verdict-card { border-left: 5px solid var(--accent); }
+.verdict-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.verdict-icon { font-size: 1.8em; }
+.verdict-reco { font-size: 1.35em; font-weight: 800; letter-spacing: 0.02em; }
+.verdict-score { margin-left: auto; font-size: 1.05em; color: var(--text-secondary); }
+.verdict-score b { color: var(--text-primary); font-size: 1.25em; }
+.verdict-summary { margin: 10px 0 0; color: var(--text-secondary); line-height: 1.55; }
+.score-track { height: 10px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; margin-top: 4px; }
+.score-fill { height: 100%; border-radius: 999px; transition: width 0.7s ease; }
+
+/* ── RAGAS metrics ───────────────────────────────────────────────── */
+.metric-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0 4px; }
+.metric-label { font-weight: 600; color: var(--text-secondary); font-size: 0.93em; }
+.metric-value { font-weight: 800; font-size: 0.98em; }
+.metric-track { height: 8px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; }
+.metric-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease; }
+.tip { cursor: help; font-size: 0.85em; }
+
+/* ── Findings table ──────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+thead tr { background: var(--bg-table-header); border-bottom: 2px solid var(--border-color); }
+th { padding: 10px 12px; text-align: left; color: var(--text-primary); }
+td { padding: 10px 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); vertical-align: top; }
+tbody tr:hover { background: var(--bg-card-alt); }
+
+/* ── Theme toggle ────────────────────────────────────────────────── */
+#theme-toggle-btn {
+    float: right; margin-top: 18px !important; background: var(--glass) !important;
+    border: 1px solid var(--glass-border) !important; border-radius: 10px !important;
+    padding: 4px 10px !important; font-size: 1.1em !important; min-width: 44px !important;
+    transition: all 0.2s ease !important;
+    box-shadow: var(--glass-highlight) !important;
+    backdrop-filter: blur(10px) !important;
+}
+#theme-toggle-btn:hover { background: var(--accent-soft) !important; border-color: var(--glass-edge) !important; }
+
+/* ── Loading spinner ─────────────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-spinner {
+    display: flex; align-items: center; gap: 12px; padding: 24px 0; justify-content: center;
+}
+.loading-spinner .spinner {
+    width: 24px; height: 24px; border: 3px solid var(--spinner-track);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+.loading-spinner .label { color: var(--text-muted); font-size: 0.95em; }
+"""
+
+JS_RESTORE_THEME = """
+() => {
+    // Single source of truth for the theme: the body.dark class that
+    // Gradio itself also uses for dark mode.  Our own key in localStorage
+    // only records an explicit choice; when absent, whatever Gradio picked
+    // (OS preference) is left untouched.
+    const saved = localStorage.getItem("ocr-theme");
+    if (saved === "dark") document.body.classList.add("dark");
+    if (saved === "light") document.body.classList.remove("dark");
+    const btn = document.querySelector("#theme-toggle-btn");
+    if (btn) btn.textContent = document.body.classList.contains("dark") ? "☀️" : "🌙";
+}
+"""
+
+JS_TOGGLE_THEME = """
+() => {
+    const isDark = document.body.classList.toggle("dark");
+    localStorage.setItem("ocr-theme", isDark ? "dark" : "light");
+    const btn = document.querySelector("#theme-toggle-btn");
+    if (btn) btn.textContent = isDark ? "☀️" : "🌙";
+    return [];
+}
+"""
+
+# ── Initialise observability backends ────────────────────────────────
+# Wrap in try/except so a failure here doesn't prevent the UI from loading.
+# This is important on Hugging Face Spaces where dependencies may have
+# version incompatibilities.
+try:
+    _init_observability_ui()
+except Exception as exc:
+    logger.warning("Observability initialisation failed (non-fatal): %s", exc)
+
+with gr.Blocks(title="OpenCodeReview") as demo:
+    demo.load(js=JS_RESTORE_THEME)
+
+    # Discover configured endpoints once — reused by the hero chip and the
+    # health accordion.  (The dropdown builds its grouped choices live via
+    # endpoints.dropdown_choices() so built-ins + added endpoints stay in sync.)
+    _configured_endpoints = discover_endpoints()
+
+    with gr.Row():
+        with gr.Column(scale=4):
+            gr.HTML(
+                '<div class="hero">'
+                '<div class="hero-icon">◈</div>'
+                '<div>'
+                '<h1 class="hero-title">OpenCodeReview</h1>'
+                '<p class="hero-sub">AI-powered PR review with human-in-the-loop approval</p>'
+                f'<div class="chips-row" style="margin-top:8px">'
+                f'<span class="key-chip ok">{len(_configured_endpoints)} endpoint'
+                f'{"s" if len(_configured_endpoints) != 1 else ""} configured</span>'
+                '<span class="key-chip">Built-ins: Gemini · Groq</span>'
+                '<span class="key-chip">Bring your own keys</span>'
+                '</div>'
+                '</div>'
+                '</div>'
+            )
+        with gr.Column(scale=1, min_width=60):
+            theme_toggle = gr.Button("🌙", elem_id="theme-toggle-btn", size="sm", min_width=50, visible=True)
+            theme_toggle.click(js=JS_TOGGLE_THEME)
+
+    # ── State ────────────────────────────────────────────────────────────
+    pr_state = gr.State()
+    smoke_state = gr.State()
+    # Id of this session's background RAGAS task — the gr.Timer below polls
+    # it so review results render immediately instead of waiting on RAGAS.
+    ragas_task_state = gr.State(value="")
+
+    # ── Tab: Review ──────────────────────────────────────────────────
+    with gr.Tab("Review"):
+        with gr.Row():
+            repo_input = gr.Textbox(
+                label="Repository",
+                placeholder="owner/repo  (e.g. psf/requests)",
+                scale=3,
+            )
+            pr_input = gr.Number(
+                label="PR #",
+                value=1,
+                minimum=1,
+                precision=0,
+                scale=1,
+            )
+
+        with gr.Row():
+            endpoint_input = gr.Dropdown(
+                choices=[""] + dropdown_choices(),
+                value=AUTO_ENDPOINT_CHOICE,
+                label="LLM Endpoint",
+                info=(
+                    "Built-ins: Gemini and Groq (Groq serves Llama models). "
+                    "Defaults to Gemini → Groq fallback."
+                ),
+                # Grouped optgroup choices make Gradio's strict membership
+                # check reject values that sit inside a group (e.g. a custom
+                # endpoint registered moments ago).  allow_custom_value lets
+                # any registered endpoint name pass through; unknown names
+                # still fail with a clear error at review time.
+                allow_custom_value=True,
+                scale=3,
+                elem_classes=["glass-dropdown"],
+            )
+            test_selected_btn = gr.Button("Test selected", size="sm", scale=1)
+        endpoint_test_msg = gr.Markdown()
+
+        def on_test_selected(endpoint_name):
+            """Probe the currently selected endpoint (built-in or custom)."""
+            endpoint_name = _normalize_endpoint_name(endpoint_name)
+            if not endpoint_name:
+                return (
+                    "ℹ️ Leave the endpoint empty for auto (Gemini → Groq fallback), "
+                    "or pick one and test it here."
+                )
+            from backend.integrations.endpoints import get_endpoint
+
+            ep = get_endpoint(endpoint_name)
+            if ep is None:
+                return f"❌ Endpoint '{html.escape(endpoint_name)}' not found — add it in the form below first."
+            if ep.builtin and not ep.api_key:
+                key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
+                return (
+                    f"⏭️ **{html.escape(ep.name)}** key is not set — add `{html.escape(key_var)}` "
+                    "as a Space secret to test it."
+                )
+            ok, detail = _probe_endpoint(ep)
+            icon = "✅" if ok else "❌"
+            return f"{icon} **{html.escape(ep.name)}** (`{html.escape(ep.model)}`): {html.escape(detail)}"
+
+        test_selected_btn.click(
+            fn=on_test_selected,
+            inputs=[endpoint_input],
+            outputs=[endpoint_test_msg],
+        )
+
+        # ── Add your own endpoint (BYO key) ─────────────────────────
+        with gr.Accordion("Add a custom endpoint (BYO key)", open=False):
+            with gr.Row():
+                ep_name_input = gr.Textbox(
+                    label="Endpoint name",
+                    placeholder="e.g. My DeepSeek",
+                    scale=1,
+                )
+                ep_type_input = gr.Dropdown(
+                    choices=["openai", "anthropic", "google"],
+                    value="openai",
+                    label="Type",
+                    info="openai = any OpenAI-compatible API (DeepSeek, OpenRouter, Ollama…)",
+                    scale=1,
+                    elem_classes=["glass-dropdown"],
+                )
+            with gr.Row():
+                ep_base_url_input = gr.Textbox(
+                    label="API endpoint (base URL)",
+                    placeholder="https://api.deepseek.com/v1   (optional for google)",
+                    scale=2,
+                )
+                ep_model_input = gr.Textbox(
+                    label="Model",
+                    placeholder="deepseek-chat / claude-sonnet-4-20250514 / gemini-3.1-flash",
+                    scale=2,
+                )
+            ep_api_key_input = gr.Textbox(
+                label="API key",
+                type="password",
+                placeholder="sk-...  (stored in memory only, never written to disk)",
+            )
+            with gr.Row():
+                test_form_btn = gr.Button("Test this endpoint", size="sm")
+                add_endpoint_btn = gr.Button("Save & use endpoint", variant="primary", size="sm")
+                clear_endpoints_btn = gr.Button("Clear added endpoints", size="sm")
+            endpoint_save_msg = gr.Markdown()
+            session_endpoints_display = gr.HTML(value=_format_session_endpoints())
+
+        with gr.Row():
+            run_btn = gr.Button("Run review", variant="primary", size="lg", scale=2)
+            cancel_btn = gr.Button("Cancel", variant="stop", size="lg", visible=False)
+
+        loading_box = gr.HTML(
+            '<div class="loading-spinner"><div class="spinner"></div>'
+            '<span class="label">Running review pipeline...</span></div>',
+            visible=False,
+        )
+        status_msg = gr.Markdown(visible=False)
+
+        with gr.Column(visible=False) as results_panel:
+            run_summary_display = gr.HTML()
+            verdict_display = gr.HTML()
+            count_display = gr.HTML()
+            findings_display = gr.HTML()
+            ragas_display = gr.HTML()
+
+            with gr.Row():
+                approve_btn = gr.Button("Approve & post", variant="primary")
+                reject_btn = gr.Button("Reject", variant="secondary")
+
+            resume_msg = gr.Markdown()
+
+        # ── Event wiring ──────────────────────────────────────────────
+        def on_run_click(*args):
+            """Generator that clears old state, runs review, shows results."""
+            args = tuple(
+                _normalize_endpoint_name(a) if isinstance(a, str) else a
+                for a in args
+            )
+            # Yield initial loading state — must match the 12 outputs of
+            # run_btn.click in order (loading_box, cancel_btn, run_btn,
+            # status_msg, 5 result displays, pr_state, results_panel,
+            # ragas_task_state).
+            yield [
+                gr.update(visible=True),
+                gr.update(visible=True, variant="stop"),
+                gr.update(visible=False),
+                gr.update(visible=False, value=""),
+                gr.update(value=""),
+                *[None, None, None, None],
+                None,
+                gr.update(visible=False),
+                gr.update(value=""),
+            ]
+
+            for result, err in run_review(*args):
+                if err:
+                    yield [
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
+                        gr.update(visible=True, value=err),
+                        gr.update(value=""),
+                        *[None, None, None, None],
+                        None,
+                        gr.update(visible=False),
+                        gr.update(value=""),
+                    ]
+                else:
+                    run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id = result
+                    yield [
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
+                        gr.update(visible=False),
+                        gr.update(value=run_summary_html),
+                        gr.update(value=verdict_html),
+                        gr.update(value=count_html),
+                        gr.update(value=findings_html),
+                        gr.update(value=ragas_html),
+                        config_json,
+                        gr.update(visible=True),
+                        gr.update(value=ragas_task_id),
+                    ]
+
+        run_event = run_btn.click(
+            fn=on_run_click,
+            inputs=[repo_input, pr_input, endpoint_input],
+            outputs=[
+                loading_box,
+                cancel_btn,
+                run_btn,
+                status_msg,
+                run_summary_display,
+                verdict_display,
+                count_display,
+                findings_display,
+                ragas_display,
+                pr_state,
+                results_panel,
+                ragas_task_state,
+            ],
+        )
+        cancel_btn.click(fn=None, cancels=[run_event])
+
+        def on_approve(config_json):
+            msg = resume_review(config_json, "approve")
+            return gr.update(value=msg)
+
+        def on_reject(config_json):
+            msg = resume_review(config_json, "reject")
+            return gr.update(value=msg)
+
+        approve_btn.click(
+            fn=on_approve,
+            inputs=[pr_state],
+            outputs=[resume_msg],
+        )
+        reject_btn.click(
+            fn=on_reject,
+            inputs=[pr_state],
+            outputs=[resume_msg],
+        )
+
+        # ── Background RAGAS polling ────────────────────────────────────
+        # RAGAS scoring runs on a background thread so the review results
+        # render immediately; this Timer polls for the finished scores and
+        # swaps the "computing…" placeholder for the metric card.
+        ragas_timer = gr.Timer(5, active=True)
+
+        def on_ragas_tick(task_id):
+            """Render background RAGAS scores when the task finishes."""
+            if not task_id:
+                return gr.update(), gr.update()
+            with _ragas_lock:
+                entry = _ragas_tasks.get(task_id)
+            if entry is None:
+                return gr.update(), gr.update()
+            if not entry.get("done"):
+                # Stalled guard: give up after the timeout instead of
+                # leaving the "computing…" placeholder forever.
+                started = entry.get("started") or 0
+                if time.time() - started > RAGAS_TIMEOUT_SECONDS:
+                    with _ragas_lock:
+                        _ragas_tasks.pop(task_id, None)
+                    return gr.update(value=RAGAS_FAILED_HTML), gr.update(value="")
+                return gr.update(), gr.update()
+            scores = entry.get("scores") or {}
+            with _ragas_lock:
+                _ragas_tasks.pop(task_id, None)
+            if scores:
+                html_out = _format_ragas_scores(scores)
+            else:
+                html_out = RAGAS_FAILED_HTML
+            return gr.update(value=html_out), gr.update(value="")
+
+        ragas_timer.tick(
+            fn=on_ragas_tick,
+            inputs=[ragas_task_state],
+            outputs=[ragas_display, ragas_task_state],
+        )
+
+        # ── Add / clear custom endpoints ─────────────────────────────
+        def on_add_endpoint(name, ptype, base_url, api_key, model):
+            """Register the form values, refresh the dropdown, auto-select."""
+            try:
+                cfg = register_endpoint(name, ptype, api_key, base_url, model)
+                choices = dropdown_choices()
+                return (
+                    gr.update(choices=choices, value=cfg.name),
+                    f"✅ Saved **{cfg.name}** ({cfg.provider} / `{cfg.model}`) — "
+                    "it's selected above. Hit **▶ Run Review** to use it. "
+                    "Tip: use 🔌 Test endpoint connectivity (health tab) to check the key first.",
+                    _format_session_endpoints(),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                )
+            except ValueError as exc:
+                return (
+                    gr.update(),
+                    f"❌ {exc}",
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                )
+
+        def on_clear_endpoints():
+            """Remove all UI-added endpoints and reset the dropdown."""
+            clear_session_endpoints()
+            return (
+                gr.update(choices=[""] + dropdown_choices(), value=AUTO_ENDPOINT_CHOICE),
+                "🗑 Cleared — dropdown reset to the built-in default.",
+                _format_session_endpoints(),
+            )
+
+        add_endpoint_btn.click(
+            fn=on_add_endpoint,
+            inputs=[
+                ep_name_input,
+                ep_type_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+            outputs=[
+                endpoint_input,
+                endpoint_save_msg,
+                session_endpoints_display,
+                ep_name_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+        )
+        clear_endpoints_btn.click(
+            fn=on_clear_endpoints,
+            outputs=[endpoint_input, endpoint_save_msg, session_endpoints_display],
+        )
+
+        def on_test_form(name, ptype, base_url, api_key, model):
+            """Probe the form values WITHOUT saving them to the registry."""
+            name = (name or "").strip()
+            model = (model or "").strip()
+            api_key = (api_key or "").strip()
+            base_url = (base_url or "").strip() or None
+            if not (name and model and api_key):
+                return (
+                    "❌ Fill in **name**, **model** and **API key** first "
+                    "(use `dummy` for keyless local servers)."
+                )
+            from backend.integrations.endpoints import SUPPORTED_PROVIDERS
+
+            if (ptype or "openai").strip().lower() not in SUPPORTED_PROVIDERS:
+                return f"❌ Unsupported type — use one of {SUPPORTED_PROVIDERS}."
+            cfg = EndpointConfig(
+                name=name,
+                provider=ptype,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+            )
+            ok, detail = _probe_endpoint(cfg)
+            icon = "✅" if ok else "❌"
+            if ok:
+                return f"{icon} **{html.escape(name)}** (`{html.escape(model)}`) — {html.escape(detail)}"
+            return f"{icon} **{html.escape(name)}** — {html.escape(detail)}"
+
+        test_form_btn.click(
+            fn=on_test_form,
+            inputs=[
+                ep_name_input,
+                ep_type_input,
+                ep_base_url_input,
+                ep_api_key_input,
+                ep_model_input,
+            ],
+            outputs=[endpoint_save_msg],
+        )
+
+    # ── Tab: Smoke test ──────────────────────────────────────────────
+    with gr.Tab("Smoke test"):
+        gr.Markdown(
+            "Run the review pipeline on **synthetic demo data** — no API keys needed."
+        )
+        with gr.Row():
+            smoke_btn = gr.Button("Run smoke test", variant="primary", size="lg", scale=2)
+            smoke_cancel_btn = gr.Button("Cancel", variant="stop", size="lg", visible=False)
+
+        smoke_loading = gr.HTML(
+            '<div class="loading-spinner"><div class="spinner"></div>'
+            '<span class="label">Running smoke test...</span></div>',
+            visible=False,
+        )
+
+        with gr.Column(visible=False) as smoke_results:
+            smoke_verdict = gr.HTML()
+            smoke_findings = gr.HTML()
+            with gr.Row():
+                smoke_approve = gr.Button("Approve (demo)", variant="primary")
+                smoke_reject = gr.Button("Reject (demo)", variant="secondary")
+            smoke_resume_msg = gr.Markdown()
+
+        smoke_status = gr.Markdown(visible=False)
+
+        def on_smoke_click():
+            # Show loading state
+            yield [
+                gr.update(visible=True),
+                gr.update(visible=True, variant="stop"),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                None,
+                gr.update(value=""),
+                gr.update(value=""),
+                gr.update(visible=False),
+            ]
+            for result, err in run_smoke():
+                if err:
+                    yield [
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
+                        gr.update(visible=False),
+                        None,
+                        gr.update(value=""),
+                        gr.update(value=""),
+                        gr.update(visible=True, value=err),
+                    ]
+                else:
+                    verdict_html, findings_html, config_json, s_verdict, s_findings = result
+                    yield [
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=True),
+                        gr.update(visible=True),
+                        config_json,
+                        gr.update(value=s_verdict),
+                        gr.update(value=s_findings),
+                        gr.update(visible=False),
+                    ]
+
+        smoke_event = smoke_btn.click(
+            fn=on_smoke_click,
+            outputs=[smoke_loading, smoke_cancel_btn, smoke_btn, smoke_results, smoke_state,
+                     smoke_verdict, smoke_findings, smoke_status],
+        )
+        smoke_cancel_btn.click(fn=None, cancels=[smoke_event])
+
+        smoke_approve.click(
+            fn=lambda c: resume_review(c, "approve"),
+            inputs=[smoke_state],
+            outputs=[smoke_resume_msg],
+        )
+        smoke_reject.click(
+            fn=lambda c: resume_review(c, "reject"),
+            inputs=[smoke_state],
+            outputs=[smoke_resume_msg],
+        )
+
+    # ── Environment status footer ──────────────────────────────────────
+    with gr.Accordion("Configured keys & health", open=False):
+        h = HealthStatus()
+        health_data = h.summary()
+        gemini_ok = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+        groq_ok = bool(os.environ.get("GROQ_API_KEY", "").strip())
+        gh_ok = bool(os.environ.get("GITHUB_TOKEN", "").strip())
+        lines = [
+            f"<li>GEMINI_API_KEY: {'✅ Set' if gemini_ok else '❌ Not set'}</li>",
+            f"<li>GROQ_API_KEY: {'✅ Set' if groq_ok else '❌ Not set'}</li>",
+            f"<li>GITHUB_TOKEN: {'✅ Set' if gh_ok else '❌ Not set'}</li>",
+            f"<li>LangSmith: {health_data['LangSmith']}</li>",
+            f"<li>Langfuse: {health_data['Langfuse']}</li>",
+        ]
+        gr.HTML("<ul>" + "".join(lines) + "</ul>")
+
+        gr.HTML(
+            '<div class="card-title" style="margin:14px 0 8px">⚡ LLM Endpoints</div>'
+        )
+        if _configured_endpoints:
+            endpoint_cards = "".join(
+                f'<div class="endpoint-card">'
+                f'<div class="endpoint-name">{html.escape(ep.name)}'
+                f'<span class="endpoint-badge">{html.escape(ep.provider)}</span>'
+                + (
+                    '<span class="endpoint-badge" style="color:#dc2626;background:#dc262611;border-color:#dc262644">missing key</span>'
+                    if not ep.api_key else ""
+                )
+                + '</div>'
+                f'<div class="endpoint-meta"><code>{html.escape(ep.model)}</code>'
+                f' · {html.escape(ep.base_url or "default URL")} · key {ep.masked_key}</div>'
+                f'</div>'
+                for ep in _configured_endpoints
+            )
+            gr.HTML(f'<div>{endpoint_cards}</div>')
+        else:
+            gr.HTML(
+                '<p class="muted small">None configured — set '
+                '<code>OCR_ENDPOINT_1_NAME</code> / <code>_TYPE</code> / '
+                '<code>_API_KEY</code> / <code>_BASE_URL</code> / <code>_MODEL</code> '
+                'as Space secrets to add one.</p>'
+            )
+        with gr.Row():
+            test_endpoints_btn = gr.Button("Test endpoint connectivity", size="sm", variant="secondary")
+        endpoint_test_out = gr.HTML()
+        test_endpoints_btn.click(fn=test_endpoints, outputs=[endpoint_test_out])
+
+    # ── Footer ─────────────────────────────────────────────────────────
+    _commit, _ts = _get_deploy_info()
+    gr.HTML(
+        f'<p class="footer">'
+        f'Built with LangGraph · Groq · ChromaDB · Gradio'
+        f'<br><span style="opacity:0.5;font-size:0.85em;color:var(--text-footer)">'
+        f'deploy: <code>{_commit}</code> · {_ts}'
+        f'</span></p>'
+    )
+
+
+def _resolve_port() -> int:
+    """Resolve the listen port from $PORT, falling back to 7860.
+
+    HF Spaces always sets a valid $PORT, but locally the variable may be
+    empty or even 0 (e.g. inherited from an unrelated shell profile) —
+    binding port 0 makes Gradio's post-launch self-check fail with a
+    confusing connection traceback, so invalid values are rejected here.
+    """
+    raw = (os.environ.get("PORT") or "").strip()
+    try:
+        port = int(raw) if raw else 7860
+    except ValueError:
+        logger.warning("Ignoring non-numeric PORT=%r — using 7860", raw)
+        return 7860
+    if not 1 <= port <= 65535:
+        logger.warning("Ignoring out-of-range PORT=%d — using 7860", port)
+        return 7860
+    return port
+
+
+def main() -> None:
+    port = _resolve_port()
+    # Gradio 6: theme/css moved from the Blocks constructor to launch().
+    demo.queue(max_size=10).launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+        theme=gr.themes.Soft(),
+        css=CSS,
+    )
+
+
+if __name__ == "__main__":
+    main()
