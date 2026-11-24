@@ -90,7 +90,7 @@ AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq fallback)"
 
 
 def _normalize_endpoint_name(endpoint_name: str | None) -> str:
-    return "" if endpoint_name == AUTO_ENDPOINT_CHOICE else (endpoint_name or "")
+    return "" if endpoint_name == AUTO_ENDPOINT_CHOICE or (endpoint_name or "").strip().lower() == "auto" else (endpoint_name or "")
 
 
 # ─── Orchestration ───────────────────────────────────────────────────────────
