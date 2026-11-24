@@ -36,35 +36,7 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
-def _temporary_network_probe():
-    """Compare verified IPv4 and IPv6 handshakes without credentials."""
-    import socket
-    import ssl
-    host = "api.cloudflare.com"
-    try:
-        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        candidates = []
-        seen = set()
-        for family, kind, proto, _, address in addresses:
-            if family in (socket.AF_INET, socket.AF_INET6) and (family, address[0]) not in seen:
-                seen.add((family, address[0]))
-                candidates.append((family, kind, proto, address))
-        logger.warning("Network diagnostic: address count=%d", len(candidates))
-        for index, (family, kind, proto, address) in enumerate(candidates):
-            for attempt in range(2):
-                start = time.monotonic()
-                try:
-                    with socket.socket(family, kind, proto) as sock:
-                        sock.settimeout(12)
-                        sock.connect(address)
-                        with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
-                            logger.warning("Network diagnostic: index=%d family=%s attempt=%d TLS=ok duration=%.2fs", index, family.name, attempt + 1, time.monotonic() - start)
-                except Exception as exc:
-                    logger.warning("Network diagnostic: index=%d family=%s attempt=%d error=%s duration=%.2fs", index, family.name, attempt + 1, type(exc).__name__, time.monotonic() - start)
-    except Exception as exc:
-        logger.warning("Network diagnostic: DNS error=%s", type(exc).__name__)
 
-threading.Thread(target=_temporary_network_probe, daemon=True).start()
 
 
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]

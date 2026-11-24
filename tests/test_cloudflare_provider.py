@@ -10,6 +10,8 @@ def test_cloudflare_default_and_shared_pacing(monkeypatch):
     assert model.model_name == '@cf/zai-org/glm-4.7-flash'
     assert str(model.openai_api_base) == 'https://api.cloudflare.com/client/v4/accounts/test-account/ai/v1'
     assert model.max_retries == 0
+    assert model.max_tokens >= 4096
+    assert model.reasoning_effort == 'low'
     assert model.rate_limiter is llm_factory._cloudflare_limiter
     assert llm_factory.create_llm().rate_limiter is model.rate_limiter
 

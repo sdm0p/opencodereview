@@ -120,9 +120,19 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
     if not api_key or not account_id:
         return None
     from langchain_openai import ChatOpenAI
-    kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
+    import httpx
+    timeout = kwargs.pop("timeout", DEFAULT_REQUEST_TIMEOUT)
+    if isinstance(timeout, (int, float)):
+        timeout = httpx.Timeout(timeout, connect=min(float(timeout), 8.0))
+    # Retry only failures while establishing a connection, before an HTTP
+    # request is sent. Preserve normal TLS certificate and hostname checks.
+    # IPv6 is unavailable on the hosted Space; keep DNS and TLS SNI intact.
+    kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
+    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
+    kwargs["timeout"] = timeout
     kwargs.setdefault("max_retries", 0)
-    kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
+    kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or DEFAULT_OUTPUT_TOKENS), 4096)
+    kwargs.setdefault("reasoning_effort", "low")
     kwargs.setdefault("rate_limiter", _cloudflare_limiter)
     return ChatOpenAI(model=kwargs.pop("model", CLOUDFLARE_MODEL), api_key=api_key,
                       base_url=f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
