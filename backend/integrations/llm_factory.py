@@ -1,21 +1,14 @@
-"""LLM factory — creates LangChain chat models with primary + fallback support.
-
-Priority
---------
-1. **Google Gemini** (primary) — uses ``GEMINI_API_KEY`` env var.
-   Model: ``gemini-3.1-flash-lite`` — generous free tier.
-2. **Groq** (fallback) — uses ``GROQ_API_KEY`` env var.
-   Model: ``llama-3.3-70b-versatile`` — fast inference, lower free limit.
-
-If neither key is set, functions raise ``ValueError`` so callers can skip
-gracefully (as they already do for Groq-only today).
-"""
+"""Create chat models with OpenRouter, Groq, Gemini, and custom endpoints."""
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
+from collections import deque
 from typing import Any, Optional
+from langchain_core.rate_limiters import BaseRateLimiter, InMemoryRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +17,41 @@ logger = logging.getLogger(__name__)
 # The base 'gemini-3.1-flash' does not exist in the API.
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+class OpenRouterRateLimiter(BaseRateLimiter):
+    """Conservative per-process pacing and rolling daily attempt budget."""
+
+    def __init__(self, daily_limit: int = 50):
+        self.pacer = InMemoryRateLimiter(requests_per_second=0.2, check_every_n_seconds=0.1, max_bucket_size=1)
+        self.daily_limit = daily_limit
+        self.attempts = deque()
+        self.lock = threading.Lock()
+
+    def _reserve(self):
+        now = time.monotonic()
+        with self.lock:
+            while self.attempts and self.attempts[0] <= now - 86400:
+                self.attempts.popleft()
+            if len(self.attempts) >= self.daily_limit:
+                raise ValueError("OpenRouter local daily request budget reached; try later or choose another provider.")
+            self.attempts.append(now)
+
+    def acquire(self, *, blocking: bool = True) -> bool:
+        if not self.pacer.acquire(blocking=blocking):
+            return False
+        self._reserve()
+        return True
+
+    async def aacquire(self, *, blocking: bool = True) -> bool:
+        if not await self.pacer.aacquire(blocking=blocking):
+            return False
+        self._reserve()
+        return True
+
+
+# Shared by reviewers and evaluation in this process. OpenRouter enforces the
+# account-wide quota across restarts, deployments, and other applications.
+_openrouter_limiter = OpenRouterRateLimiter(max(1, int(os.getenv("OPENROUTER_DAILY_REQUEST_LIMIT", "50"))))
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "60"))
 DEFAULT_OUTPUT_TOKENS = int(os.getenv("OCR_MODEL_MAX_OUTPUT_TOKENS", "2000"))
@@ -83,6 +111,21 @@ def _get_groq_chat(**kwargs: Any) -> Optional[Any]:
     except Exception as exc:
         logger.warning("Failed to initialise Groq: %s", exc)
         return None
+
+
+def _get_openrouter_chat(**kwargs: Any) -> Optional[Any]:
+    """Use the OpenRouter free router when a server-side key is configured."""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        return None
+    from langchain_openai import ChatOpenAI
+    kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
+    kwargs.setdefault("max_retries", 0)
+    kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
+    kwargs.setdefault("rate_limiter", _openrouter_limiter)
+    return ChatOpenAI(model=kwargs.pop("model", OPENROUTER_MODEL), api_key=api_key,
+                      base_url="https://openrouter.ai/api/v1",
+                      temperature=kwargs.pop("temperature", DEFAULT_TEMPERATURE), **kwargs)
 
 
 def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
@@ -181,12 +224,14 @@ def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
     }
     if endpoint.base_url:
         params["base_url"] = endpoint.base_url
+        if "openrouter.ai" in endpoint.base_url.lower():
+            kwargs.setdefault("rate_limiter", _openrouter_limiter)
     params.update(kwargs)
     return ChatOpenAI(**params)
 
 
 def create_llm(endpoint=None, **kwargs: Any) -> Any:
-    """Create a chat LLM — custom endpoint first, else Gemini → Groq.
+    """Create a chat LLM — selected endpoint first, else OpenRouter → Groq → Gemini.
 
     Parameters
     ----------
@@ -215,10 +260,15 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
         # The browser historically sent lowercase builtin ids while the
         # endpoint registry uses display names. Accept both for API clients.
         if isinstance(endpoint, str):
-            endpoint = {"gemini": "Gemini", "groq": "Grok"}.get(endpoint.lower(), endpoint)
+            endpoint = {"gemini": "Gemini", "groq": "Grok", "openrouter": "OpenRouter"}.get(endpoint.lower(), endpoint)
         ep = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
         if ep is not None:
             if getattr(ep, "builtin", False):
+                if ep.name == "OpenRouter":
+                    llm = _get_openrouter_chat(**kwargs)
+                    if llm is not None:
+                        return llm
+                    raise ValueError("OpenRouter selected but OPENROUTER_API_KEY is not set.")
                 # Built-in providers use their native constructors so the
                 # behaviour is identical to the default (no-endpoint) path.
                 if ep.name == "Gemini":
@@ -255,6 +305,10 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
                 "Configure it via OCR_ENDPOINT_* environment variables "
                 "or add it in the UI."
             )
+
+    llm = _get_openrouter_chat(**kwargs)
+    if llm is not None:
+        return llm
 
     # Prefer Groq when configured: it has a separate quota pool and avoids
     # stalling the review pipeline on Gemini free-tier exhaustion.

@@ -222,9 +222,17 @@ def builtin_endpoints() -> list[EndpointConfig]:
     ``GEMINI_API_KEY`` / ``GROQ_API_KEY`` env vars and run on the same
     models as the default (no-endpoint) path.
     """
-    from backend.integrations.llm_factory import GEMINI_MODEL, GROQ_MODEL
+    from backend.integrations.llm_factory import GEMINI_MODEL, GROQ_MODEL, OPENROUTER_MODEL
 
     return [
+        EndpointConfig(
+            name="OpenRouter",
+            provider="openai",
+            api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
+            base_url="https://openrouter.ai/api/v1",
+            model=OPENROUTER_MODEL,
+            builtin=True,
+        ),
         EndpointConfig(
             name="Gemini",
             provider="google",

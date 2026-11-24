@@ -68,7 +68,9 @@ The API persists job records in Supabase Postgres when configured and otherwise 
 
 ## Model and retrieval options
 
-The model factory supports the built-in Groq and Google Gemini providers, plus configured custom endpoints such as OpenAI-compatible APIs and Anthropic. An explicitly selected endpoint is used for that run; otherwise the default path prefers Groq when configured and falls back to Gemini. Built-in provider keys are read from environment variables. GitHub access can use a token or the OAuth Device Flow, which stores its token in the OS keyring.
+The model factory supports OpenRouter, Groq and Google Gemini, plus configured custom endpoints such as OpenAI-compatible APIs and Anthropic. An explicitly selected endpoint is used for that run; otherwise the default path selects OpenRouter when configured, followed by Groq and Gemini. Built-in provider keys are read from environment variables. GitHub access can use a token or the OAuth Device Flow, which stores its token in the OS keyring.
+
+Set `OPENROUTER_API_KEY` to make the `openrouter/free` router the default for automatic reviews and evaluation. `OPENROUTER_MODEL` can override the model, and `OPENROUTER_DAILY_REQUEST_LIMIT` sets the local rolling attempt budget (default 50). Calls are paced to one every five seconds and automatic provider retries are disabled. The local budget resets on restart and is shared only within one process; OpenRouter enforces account-wide limits, including requests from other applications. Free model availability, structured output support, and quotas vary. See [OpenRouter's free model limits](https://openrouter.ai/collections/free-models/).
 
 Retrieval is optional. It uses ChromaDB with local embeddings when enabled; the hosted workflow can continue with the pull request diff when retrieval is disabled or unavailable. The index is selective and revision-aware, rather than a blind copy of every repository file.
 

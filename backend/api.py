@@ -472,7 +472,7 @@ _hydrate_jobs()
 def health() -> dict[str, Any]:
     provider_configured = any(
         os.getenv(name, "").strip()
-        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        for name in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
     )
     require_auth = os.getenv("OCR_REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
     persistence = "local_default_path"
