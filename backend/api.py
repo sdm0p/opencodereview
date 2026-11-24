@@ -36,6 +36,34 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
+def _temporary_network_probe():
+    """Compare verified IPv4 and IPv6 handshakes without credentials."""
+    import socket
+    import ssl
+    host = "api.cloudflare.com"
+    try:
+        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        candidates = {}
+        for family, kind, proto, _, address in addresses:
+            if family in (socket.AF_INET, socket.AF_INET6):
+                candidates.setdefault(family, (kind, proto, address))
+        logger.warning("Network diagnostic: IPv4=%s IPv6=%s", socket.AF_INET in candidates, socket.AF_INET6 in candidates)
+        for family, (kind, proto, address) in candidates.items():
+            for attempt in range(2):
+                start = time.monotonic()
+                try:
+                    with socket.socket(family, kind, proto) as sock:
+                        sock.settimeout(12)
+                        sock.connect(address)
+                        with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+                            logger.warning("Network diagnostic: family=%s attempt=%d TLS=ok duration=%.2fs", family.name, attempt + 1, time.monotonic() - start)
+                except Exception as exc:
+                    logger.warning("Network diagnostic: family=%s attempt=%d error=%s duration=%.2fs", family.name, attempt + 1, type(exc).__name__, time.monotonic() - start)
+    except Exception as exc:
+        logger.warning("Network diagnostic: DNS error=%s", type(exc).__name__)
+
+threading.Thread(target=_temporary_network_probe, daemon=True).start()
+
 
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=True)
