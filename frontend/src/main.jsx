@@ -61,6 +61,7 @@ function ReviewProgress({ job }) {
   const stages = job.review_stages || [];
   const timings = job.stage_timings || {};
   return <section className="review-progress" aria-label="Review progress" aria-live="polite">
+    {job.persistence === "local_fallback" && <p className="message error">This review is stored locally because the shared database is unavailable. It may be lost if the server restarts.</p>}
     {job.status === "incomplete" && <p className="message error">Review incomplete. Failed reviewers do not mean the code is free of issues.</p>}
     <div className="metrics">{job.elapsed_seconds != null && <span>Elapsed: {Math.round(job.elapsed_seconds)}s</span>}{job.review_mode && <span>{pretty(job.review_mode)} review</span>}{job.progress?.completed_stages?.length > 0 && <span>{job.progress.completed_stages.length} stages finished</span>}</div>
     {stages.length > 0 && <ul className="reviewer-stages">{stages.map((stage, index) => <li key={`${stage.reviewer}-${index}`}><strong>{pretty(stage.reviewer)}</strong><span>{pretty(stage.status)}{stage.duration_seconds != null ? ` · ${stage.duration_seconds.toFixed(1)}s` : ""}</span>{stage.model && <small>{stage.model}</small>}{stage.reason && <small>{stage.reason}</small>}{stage.error && <small className="reviewer-error">{stage.error}</small>}</li>)}</ul>}

@@ -11,6 +11,7 @@ import hashlib
 import time
 from pathlib import Path
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -33,6 +34,7 @@ from backend.state import Finding, Verdict
 from backend.integrations.endpoints import register_endpoint, unregister_endpoint
 
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
+logger = logging.getLogger(__name__)
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=True)
 
@@ -67,10 +69,23 @@ def _postgres_connect():
     try:
         import psycopg
         return psycopg.connect(url)
-    except Exception:
+    except Exception as exc:
+        # Connection strings and provider errors can include credentials.
+        logger.warning("Shared database connection failed (%s); using local storage", type(exc).__name__)
         return None
 
+def _sqlite_connect():
+    """Open the fallback store and ensure its schema exists on every path."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS review_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    conn.commit()
+    return conn
+
 def _init_jobs() -> None:
+    # Prepare the fallback even when Postgres is available at startup: it can
+    # become unavailable later, while the process is still running.
+    with _sqlite_connect():
+        pass
     pg = _postgres_connect()
     if pg is not None:
         with pg:
@@ -82,9 +97,6 @@ def _init_jobs() -> None:
                 cur.execute("create index if not exists review_jobs_status_idx on public.review_jobs (status)")
         pg.close()
         return
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS review_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
-        conn.commit()
 
 _init_jobs()
 
@@ -92,7 +104,7 @@ def _save_job(job: dict[str, Any]) -> None:
     payload = {k: v for k, v in job.items() if k not in {"future", "ragas_inputs"}}
     if "config" in payload:
         payload["config"] = {"configurable": payload["config"].get("configurable", {})}
-    pg = _postgres_connect()
+    pg = None if job.get("persistence") == "local_fallback" else _postgres_connect()
     if pg is not None:
         with pg:
             with pg.cursor() as cur:
@@ -103,7 +115,9 @@ def _save_job(job: dict[str, Any]) -> None:
                     (job["id"], job["repo"], job["pr_number"], job.get("endpoint"), job["status"], json.dumps(payload, default=str)))
         pg.close()
         return
-    with sqlite3.connect(DB_PATH) as conn:
+    job["persistence"] = "local_fallback"
+    payload["persistence"] = "local_fallback"
+    with _sqlite_connect() as conn:
         conn.execute("INSERT OR REPLACE INTO review_jobs (id, payload) VALUES (?, ?)", (job["id"], json.dumps(payload, default=str)))
         conn.commit()
 
@@ -114,10 +128,9 @@ def _load_job(job_id: str) -> dict[str, Any] | None:
             cur.execute("select payload from public.review_jobs where id = %s", (job_id,))
             row = cur.fetchone()
         pg.close()
-        if not row:
-            return None
-        return json.loads(row[0]) if isinstance(row[0], str) else row[0]
-    with sqlite3.connect(DB_PATH) as conn:
+        if row:
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+    with _sqlite_connect() as conn:
         row = conn.execute("SELECT payload FROM review_jobs WHERE id = ?", (job_id,)).fetchone()
     return json.loads(row[0]) if row else None
 
@@ -129,7 +142,7 @@ def _load_jobs() -> list[dict[str, Any]]:
             rows = cur.fetchall()
         pg.close()
         return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
-    with sqlite3.connect(DB_PATH) as conn:
+    with _sqlite_connect() as conn:
         rows = conn.execute("SELECT payload FROM review_jobs").fetchall()
     return [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
 
