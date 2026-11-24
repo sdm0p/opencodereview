@@ -43,6 +43,18 @@ def test_timeout_reason_is_actionable():
     assert 'deadline' in result['reason']
 
 
+def test_provider_diagnostics_only_log_exception_types(caplog):
+    cause = ConnectionError('private-token-and-url')
+    error = RuntimeError('private-payload')
+    error.__cause__ = cause
+    model = model_with_results(error)
+    with pytest.raises(RuntimeError):
+        invoke_review(model, Review, [])
+    assert 'RuntimeError -> ConnectionError' in caplog.text
+    assert 'private-token' not in caplog.text
+    assert 'private-payload' not in caplog.text
+
+
 def test_tracing_context_survives_deadline_worker():
     trace = ContextVar('test_trace', default='missing')
     token = trace.set('active-trace')

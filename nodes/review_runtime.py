@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextvars import copy_context
 import json
+import logging
 import os
 import queue
 import re
@@ -10,6 +11,19 @@ import threading
 import time
 
 from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
+
+
+def _error_types(exc):
+    """Describe exception causes without logging messages, URLs, or payloads."""
+    types = []
+    seen = set()
+    while exc is not None and id(exc) not in seen and len(types) < 6:
+        seen.add(id(exc))
+        types.append(type(exc).__name__)
+        exc = exc.__cause__ or exc.__context__
+    return " -> ".join(types)
 
 
 def changed_context(changed_file, mode):
@@ -50,9 +64,12 @@ def invoke_review(llm, schema, messages, mode="thorough"):
     for attempt in range(2):
         result_queue = queue.Queue(maxsize=1)
         def run(target=result_queue, request=list(messages)):
+            started = time.monotonic()
             try:
                 target.put((True, structured.invoke(request)))
             except Exception as exc:
+                logger.warning("Reviewer provider call failed after %.2fs; error types: %s",
+                               time.monotonic() - started, _error_types(exc))
                 target.put((False, exc))
         threading.Thread(target=copy_context().run, args=(run,), daemon=True).start()
         remaining = deadline - time.monotonic()
