@@ -36,33 +36,6 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
-def _temporary_cloudflare_probe():
-    """Compare small authenticated requests; never log credentials or content."""
-    import httpx
-    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
-    if not account or not token:
-        logger.warning("Cloudflare probe: credentials missing")
-        return
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {token}"}
-    body = {"model": "@cf/zai-org/glm-4.7-flash", "messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 64}
-    for label, call in (("httpx", lambda: httpx.post(url, headers=headers, json=body, timeout=30)),
-                        ("requests", lambda: requests.post(url, headers=headers, json=body, timeout=30))):
-        start = time.monotonic()
-        try:
-            response = call()
-            logger.warning("Cloudflare probe: %s status=%s duration=%.2fs", label, response.status_code, time.monotonic() - start)
-        except Exception as exc:
-            types, seen = [], set()
-            while exc is not None and id(exc) not in seen and len(types) < 6:
-                seen.add(id(exc))
-                types.append(type(exc).__name__)
-                exc = exc.__cause__ or exc.__context__
-            logger.warning("Cloudflare probe: %s duration=%.2fs error types=%s", label, time.monotonic() - start, " -> ".join(types))
-        time.sleep(5)
-
-threading.Thread(target=_temporary_cloudflare_probe, daemon=True).start()
 
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=True)
