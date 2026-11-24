@@ -36,27 +36,6 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
-def _temporary_tls_diagnostic():
-    """Compare verified HTTPS clients without credentials or URL disclosure."""
-    import httpx
-    proxy_set = any(os.environ.get(name) for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"))
-    logger.warning("TLS diagnostic: proxy environment present=%s", proxy_set)
-    for name, client in (("httpx_default", lambda: httpx.get("https://api.cloudflare.com/client/v4/ips", timeout=10)),
-                         ("httpx_direct", lambda: httpx.get("https://api.cloudflare.com/client/v4/ips", timeout=10, trust_env=False)),
-                         ("requests_default", lambda: requests.get("https://api.cloudflare.com/client/v4/ips", timeout=10))):
-        try:
-            response = client()
-            logger.warning("TLS diagnostic: %s HTTP %s", name, response.status_code)
-        except Exception as exc:
-            types = []
-            seen = set()
-            while exc is not None and id(exc) not in seen and len(types) < 6:
-                seen.add(id(exc))
-                types.append(type(exc).__name__)
-                exc = exc.__cause__ or exc.__context__
-            logger.warning("TLS diagnostic: %s error types %s", name, " -> ".join(types))
-
-threading.Thread(target=_temporary_tls_diagnostic, daemon=True).start()
 allowed_origins = [item.strip() for item in os.getenv("OCR_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST"], allow_headers=["*"], allow_credentials=True)
 
