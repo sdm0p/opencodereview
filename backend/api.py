@@ -43,12 +43,14 @@ def _temporary_network_probe():
     host = "api.cloudflare.com"
     try:
         addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        candidates = {}
+        candidates = []
+        seen = set()
         for family, kind, proto, _, address in addresses:
-            if family in (socket.AF_INET, socket.AF_INET6):
-                candidates.setdefault(family, (kind, proto, address))
-        logger.warning("Network diagnostic: IPv4=%s IPv6=%s", socket.AF_INET in candidates, socket.AF_INET6 in candidates)
-        for family, (kind, proto, address) in candidates.items():
+            if family in (socket.AF_INET, socket.AF_INET6) and (family, address[0]) not in seen:
+                seen.add((family, address[0]))
+                candidates.append((family, kind, proto, address))
+        logger.warning("Network diagnostic: address count=%d", len(candidates))
+        for index, (family, kind, proto, address) in enumerate(candidates):
             for attempt in range(2):
                 start = time.monotonic()
                 try:
@@ -56,9 +58,9 @@ def _temporary_network_probe():
                         sock.settimeout(12)
                         sock.connect(address)
                         with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
-                            logger.warning("Network diagnostic: family=%s attempt=%d TLS=ok duration=%.2fs", family.name, attempt + 1, time.monotonic() - start)
+                            logger.warning("Network diagnostic: index=%d family=%s attempt=%d TLS=ok duration=%.2fs", index, family.name, attempt + 1, time.monotonic() - start)
                 except Exception as exc:
-                    logger.warning("Network diagnostic: family=%s attempt=%d error=%s duration=%.2fs", family.name, attempt + 1, type(exc).__name__, time.monotonic() - start)
+                    logger.warning("Network diagnostic: index=%d family=%s attempt=%d error=%s duration=%.2fs", index, family.name, attempt + 1, type(exc).__name__, time.monotonic() - start)
     except Exception as exc:
         logger.warning("Network diagnostic: DNS error=%s", type(exc).__name__)
 
