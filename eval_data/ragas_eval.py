@@ -208,7 +208,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             from backend.integrations.llm_factory import create_llm
             from backend.integrations.endpoints import EndpointConfig, get_endpoint
             configured = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
-            timeout = 15
+            timeout = 80 if getattr(configured, "name", "") == "Cloudflare" else 15
             if configured and not getattr(configured, "builtin", False) and configured.provider not in {"google", "anthropic"}:
                 import httpx
                 # LangChain caches HTTP clients for hashable timeout values.
@@ -220,7 +220,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
 
         from backend.integrations.llm_factory import _get_cloudflare_chat, _get_groq_chat, _get_gemini_chat
 
-        llm = _get_cloudflare_chat(temperature=0, max_retries=0, timeout=15)
+        llm = _get_cloudflare_chat(temperature=0, max_retries=0, timeout=80)
         if llm is not None:
             logger.info("RAGAS evaluator: using Cloudflare Workers AI")
             return _wrap_evaluator(llm)
@@ -289,6 +289,20 @@ def _safe_metric_error(exc):
     return "failed", type(exc).__name__
 
 
+def ragas_time_limits(endpoint=None):
+    """Account for paced, remote Cloudflare inference in both deadlines."""
+    total = max(1.0, float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30")))
+    per_metric = max(.05, float(os.getenv("OCR_RAGAS_METRIC_TIMEOUT_SECONDS", "12")))
+    name = endpoint if isinstance(endpoint, str) else getattr(endpoint, "name", "")
+    uses_cloudflare = str(name).lower() == "cloudflare" or (
+        not endpoint and bool(os.getenv("CLOUDFLARE_API_TOKEN") and os.getenv("CLOUDFLARE_ACCOUNT_ID"))
+    )
+    if uses_cloudflare:
+        total = max(total, float(os.getenv("OCR_CLOUDFLARE_RAGAS_TIMEOUT_SECONDS", "210")))
+        per_metric = max(per_metric, float(os.getenv("OCR_CLOUDFLARE_RAGAS_METRIC_TIMEOUT_SECONDS", "150")))
+    return total, per_metric
+
+
 def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=None, endpoint=None, *, metric_timeout=None, progress_callback=None):
     """Run independent bounded RAGAS metrics, preserving successes and real failures.
 
@@ -299,8 +313,8 @@ def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=No
     import queue
     from contextvars import copy_context
     started = time.monotonic()
-    total_budget = max(1.0, float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30")))
-    per_metric = max(.05, float(metric_timeout or os.getenv("OCR_RAGAS_METRIC_TIMEOUT_SECONDS", "12")))
+    total_budget, default_metric_timeout = ragas_time_limits(endpoint)
+    per_metric = max(.05, float(metric_timeout if metric_timeout is not None else default_metric_timeout))
     names = ["context_precision", "faithfulness"]
     if ground_truth:
         names.append("context_recall")

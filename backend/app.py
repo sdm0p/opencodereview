@@ -542,7 +542,8 @@ def _ragas_worker(
     result_callback=None,
 ) -> None:
     """Daemon thread body: compute scores, stash them for the Timer poll."""
-    timeout = float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30"))
+    from eval_data.ragas_eval import ragas_time_limits
+    timeout, _ = ragas_time_limits(inputs.get("endpoint"))
     def report_progress(report):
         with _ragas_lock:
             entry = _ragas_tasks.get(task_id)

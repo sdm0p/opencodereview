@@ -1,6 +1,7 @@
 import pytest
 
 from backend.integrations import llm_factory
+from eval_data.ragas_eval import ragas_time_limits
 
 
 def test_cloudflare_default_and_shared_pacing(monkeypatch):
@@ -22,3 +23,10 @@ def test_daily_budget_rejects_additional_attempts():
     limiter._reserve()
     with pytest.raises(ValueError, match='daily request budget'):
         limiter._reserve()
+
+
+def test_cloudflare_evaluation_has_room_for_paced_calls(monkeypatch):
+    monkeypatch.setenv('OCR_RAGAS_TIMEOUT_SECONDS', '30')
+    monkeypatch.setenv('OCR_RAGAS_METRIC_TIMEOUT_SECONDS', '12')
+    assert ragas_time_limits('Cloudflare') == (210, 150)
+    assert ragas_time_limits('Gemini') == (30, 12)

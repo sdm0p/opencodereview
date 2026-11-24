@@ -123,12 +123,12 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
     import httpx
     timeout = kwargs.pop("timeout", DEFAULT_REQUEST_TIMEOUT)
     if isinstance(timeout, (int, float)):
-        timeout = httpx.Timeout(timeout, connect=min(float(timeout), 8.0))
+        timeout = httpx.Timeout(timeout, connect=min(float(timeout), 4.0))
     # Retry only failures while establishing a connection, before an HTTP
     # request is sent. Preserve normal TLS certificate and hostname checks.
     # IPv6 is unavailable on the hosted Space; keep DNS and TLS SNI intact.
-    kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
-    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
+    kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=5), timeout=timeout))
+    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=5), timeout=timeout))
     kwargs["timeout"] = timeout
     kwargs.setdefault("max_retries", 0)
     kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or DEFAULT_OUTPUT_TOKENS), 4096)
