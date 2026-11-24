@@ -1,4 +1,4 @@
-"""Create chat models with OpenRouter, Groq, Gemini, and custom endpoints."""
+"""Create chat models with Cloudflare, Groq, Gemini, and custom endpoints."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # The base 'gemini-3.1-flash' does not exist in the API.
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
-class OpenRouterRateLimiter(BaseRateLimiter):
+CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/zai-org/glm-4.7-flash")
+class CloudflareRateLimiter(BaseRateLimiter):
     """Conservative per-process pacing and rolling daily attempt budget."""
 
     def __init__(self, daily_limit: int = 50):
@@ -33,7 +33,7 @@ class OpenRouterRateLimiter(BaseRateLimiter):
             while self.attempts and self.attempts[0] <= now - 86400:
                 self.attempts.popleft()
             if len(self.attempts) >= self.daily_limit:
-                raise ValueError("OpenRouter local daily request budget reached; try later or choose another provider.")
+                raise ValueError("Cloudflare local daily request budget reached; try later or choose another provider.")
             self.attempts.append(now)
 
     def acquire(self, *, blocking: bool = True) -> bool:
@@ -49,9 +49,9 @@ class OpenRouterRateLimiter(BaseRateLimiter):
         return True
 
 
-# Shared by reviewers and evaluation in this process. OpenRouter enforces the
-# account-wide quota across restarts, deployments, and other applications.
-_openrouter_limiter = OpenRouterRateLimiter(max(1, int(os.getenv("OPENROUTER_DAILY_REQUEST_LIMIT", "50"))))
+# Shared by reviewers and evaluation in this process. This request budget is
+# a conservative application cap, not a measurement of Cloudflare neurons.
+_cloudflare_limiter = CloudflareRateLimiter(max(1, int(os.getenv("CLOUDFLARE_DAILY_REQUEST_LIMIT", "50"))))
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "60"))
 DEFAULT_OUTPUT_TOKENS = int(os.getenv("OCR_MODEL_MAX_OUTPUT_TOKENS", "2000"))
@@ -113,18 +113,19 @@ def _get_groq_chat(**kwargs: Any) -> Optional[Any]:
         return None
 
 
-def _get_openrouter_chat(**kwargs: Any) -> Optional[Any]:
-    """Use the OpenRouter free router when a server-side key is configured."""
-    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
+def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
+    """Use Workers AI when an account ID and API token are configured."""
+    api_key = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    if not api_key or not account_id:
         return None
     from langchain_openai import ChatOpenAI
     kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
     kwargs.setdefault("max_retries", 0)
     kwargs.setdefault("max_tokens", DEFAULT_OUTPUT_TOKENS)
-    kwargs.setdefault("rate_limiter", _openrouter_limiter)
-    return ChatOpenAI(model=kwargs.pop("model", OPENROUTER_MODEL), api_key=api_key,
-                      base_url="https://openrouter.ai/api/v1",
+    kwargs.setdefault("rate_limiter", _cloudflare_limiter)
+    return ChatOpenAI(model=kwargs.pop("model", CLOUDFLARE_MODEL), api_key=api_key,
+                      base_url=f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
                       temperature=kwargs.pop("temperature", DEFAULT_TEMPERATURE), **kwargs)
 
 
@@ -224,14 +225,14 @@ def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
     }
     if endpoint.base_url:
         params["base_url"] = endpoint.base_url
-        if "openrouter.ai" in endpoint.base_url.lower():
-            kwargs.setdefault("rate_limiter", _openrouter_limiter)
+        if "api.cloudflare.com/client/v4/accounts/" in endpoint.base_url.lower():
+            kwargs.setdefault("rate_limiter", _cloudflare_limiter)
     params.update(kwargs)
     return ChatOpenAI(**params)
 
 
 def create_llm(endpoint=None, **kwargs: Any) -> Any:
-    """Create a chat LLM — selected endpoint first, else OpenRouter → Groq → Gemini.
+    """Create a chat LLM — selected endpoint first, else Cloudflare → Groq → Gemini.
 
     Parameters
     ----------
@@ -260,15 +261,15 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
         # The browser historically sent lowercase builtin ids while the
         # endpoint registry uses display names. Accept both for API clients.
         if isinstance(endpoint, str):
-            endpoint = {"gemini": "Gemini", "groq": "Grok", "openrouter": "OpenRouter"}.get(endpoint.lower(), endpoint)
+            endpoint = {"gemini": "Gemini", "groq": "Grok", "cloudflare": "Cloudflare"}.get(endpoint.lower(), endpoint)
         ep = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
         if ep is not None:
             if getattr(ep, "builtin", False):
-                if ep.name == "OpenRouter":
-                    llm = _get_openrouter_chat(**kwargs)
+                if ep.name == "Cloudflare":
+                    llm = _get_cloudflare_chat(**kwargs)
                     if llm is not None:
                         return llm
-                    raise ValueError("OpenRouter selected but OPENROUTER_API_KEY is not set.")
+                    raise ValueError("Cloudflare selected but CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN is not set.")
                 # Built-in providers use their native constructors so the
                 # behaviour is identical to the default (no-endpoint) path.
                 if ep.name == "Gemini":
@@ -306,7 +307,7 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
                 "or add it in the UI."
             )
 
-    llm = _get_openrouter_chat(**kwargs)
+    llm = _get_cloudflare_chat(**kwargs)
     if llm is not None:
         return llm
 

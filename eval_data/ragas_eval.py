@@ -218,11 +218,11 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             logger.info("RAGAS evaluator: using selected custom endpoint")
             return _wrap_evaluator(llm)
 
-        from backend.integrations.llm_factory import _get_openrouter_chat, _get_groq_chat, _get_gemini_chat
+        from backend.integrations.llm_factory import _get_cloudflare_chat, _get_groq_chat, _get_gemini_chat
 
-        llm = _get_openrouter_chat(temperature=0, max_retries=0, timeout=15)
+        llm = _get_cloudflare_chat(temperature=0, max_retries=0, timeout=15)
         if llm is not None:
-            logger.info("RAGAS evaluator: using OpenRouter free router")
+            logger.info("RAGAS evaluator: using Cloudflare Workers AI")
             return _wrap_evaluator(llm)
 
         # Keep evaluation bounded: RAGAS runs several provider calls and

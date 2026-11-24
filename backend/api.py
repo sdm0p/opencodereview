@@ -472,8 +472,9 @@ _hydrate_jobs()
 def health() -> dict[str, Any]:
     provider_configured = any(
         os.getenv(name, "").strip()
-        for name in ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
     )
+    provider_configured = provider_configured or bool(os.getenv("CLOUDFLARE_API_TOKEN", "").strip() and os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip())
     require_auth = os.getenv("OCR_REQUIRE_AUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
     persistence = "local_default_path"
     if os.getenv("SUPABASE_DB_URL"):

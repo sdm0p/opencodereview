@@ -222,15 +222,14 @@ def builtin_endpoints() -> list[EndpointConfig]:
     ``GEMINI_API_KEY`` / ``GROQ_API_KEY`` env vars and run on the same
     models as the default (no-endpoint) path.
     """
-    from backend.integrations.llm_factory import GEMINI_MODEL, GROQ_MODEL, OPENROUTER_MODEL
+    from backend.integrations.llm_factory import GEMINI_MODEL, GROQ_MODEL, CLOUDFLARE_MODEL
 
     return [
         EndpointConfig(
-            name="OpenRouter",
+            name="Cloudflare",
             provider="openai",
-            api_key=os.environ.get("OPENROUTER_API_KEY", "").strip(),
-            base_url="https://openrouter.ai/api/v1",
-            model=OPENROUTER_MODEL,
+            api_key=os.environ.get("CLOUDFLARE_API_TOKEN", "").strip(),
+            model=CLOUDFLARE_MODEL,
             builtin=True,
         ),
         EndpointConfig(
