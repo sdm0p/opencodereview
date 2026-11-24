@@ -1,3 +1,13 @@
+---
+title: OpenCodeReview
+emoji: 🔍
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_file: app.py
+pinned: false
+---
+
 # OpenCodeReview
 
 <p align="center">
