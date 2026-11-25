@@ -36,6 +36,32 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
+def _temporary_gateway_auth_probe():
+    """Compare documented gateway header arrangements without logging secrets."""
+    import httpx
+    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    gateway = os.getenv("CLOUDFLARE_GATEWAY_ID", "").strip()
+    if not (account and token and gateway):
+        return
+    url = f"https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/compat/chat/completions"
+    data = {"model": "workers-ai/@cf/zai-org/glm-4.7-flash", "messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 32}
+    common = {"cf-aig-collect-log": "false", "cf-aig-skip-cache": "true"}
+    for label, auth in (("both", {"Authorization": f"Bearer {token}", "cf-aig-authorization": f"Bearer {token}"}),
+                        ("gateway_only", {"cf-aig-authorization": f"Bearer {token}"}),
+                        ("provider_only", {"Authorization": f"Bearer {token}"})):
+        try:
+            response = httpx.post(url, headers={**common, **auth}, json=data, timeout=25)
+            payload = response.json()
+            errors = payload.get("errors") or payload.get("error") or []
+            code = payload.get("internalCode") or (errors[0].get("code") if isinstance(errors, list) and errors else None)
+            logger.warning("Gateway auth diagnostic: method=%s status=%d code=%s", label, response.status_code, code)
+        except Exception as exc:
+            logger.warning("Gateway auth diagnostic: method=%s error=%s", label, type(exc).__name__)
+        time.sleep(5)
+
+threading.Thread(target=_temporary_gateway_auth_probe, daemon=True).start()
+
 
 
 
