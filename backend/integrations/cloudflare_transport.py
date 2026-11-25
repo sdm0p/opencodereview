@@ -13,22 +13,25 @@ import httpx
 
 
 HOST = "api.cloudflare.com"
+ALLOWED_HOSTS = {HOST, "gateway.ai.cloudflare.com"}
 logger = logging.getLogger(__name__)
 
 
 class ReachableCloudflareRoutes:
     """Resolve normally and cache only addresses with a verified TLS handshake."""
 
-    def __init__(self):
+    def __init__(self, host=HOST):
+        if host not in ALLOWED_HOSTS:
+            raise ValueError("Cloudflare transport only permits official Cloudflare HTTPS hosts")
+        self.host = host
         self._lock = threading.Lock()
         self._routes = []
         self._expires = 0.0
 
-    @staticmethod
-    def _probe(address):
+    def _probe(self, address):
         try:
             with socket.create_connection((address, 443), timeout=3) as conn:
-                with ssl.create_default_context().wrap_socket(conn, server_hostname=HOST):
+                with ssl.create_default_context().wrap_socket(conn, server_hostname=self.host):
                     return address
         except OSError:
             return None
@@ -39,7 +42,7 @@ class ReachableCloudflareRoutes:
             routes = [item for item in self._routes if item not in excluded] if now < self._expires else []
             if routes:
                 return routes[0]
-            addresses = list(dict.fromkeys(item[4][0] for item in socket.getaddrinfo(HOST, 443, socket.AF_INET, socket.SOCK_STREAM)))[:12]
+            addresses = list(dict.fromkeys(item[4][0] for item in socket.getaddrinfo(self.host, 443, socket.AF_INET, socket.SOCK_STREAM)))[:12]
             addresses = [item for item in addresses if item not in excluded]
             with ThreadPoolExecutor(max_workers=max(1, len(addresses))) as pool:
                 futures = [pool.submit(self._probe, address) for address in addresses]
@@ -56,13 +59,13 @@ class ReachableCloudflareRoutes:
             self._routes = [route for route in self._routes if route != address]
 
 
-def _routed_request(request, address):
-    if request.url.scheme != "https" or request.url.host != HOST:
-        raise ValueError("Cloudflare transport only permits the official HTTPS API host")
+def _routed_request(request, address, host=HOST):
+    if host not in ALLOWED_HOSTS or request.url.scheme != "https" or request.url.host != host:
+        raise ValueError("Cloudflare transport only permits configured official HTTPS hosts")
     headers = httpx.Headers(request.headers)
-    headers["Host"] = HOST
+    headers["Host"] = host
     extensions = dict(request.extensions)
-    extensions["sni_hostname"] = HOST
+    extensions["sni_hostname"] = host
     return httpx.Request(request.method, request.url.copy_with(host=address), headers=headers,
                          stream=request.stream, extensions=extensions)
 
@@ -70,6 +73,7 @@ def _routed_request(request, address):
 class CloudflareTransport(httpx.BaseTransport):
     def __init__(self, routes):
         self.routes = routes
+        self.host = getattr(routes, "host", HOST)
         self.transport = httpx.HTTPTransport(local_address="0.0.0.0", retries=0)
 
     def handle_request(self, request):
@@ -83,7 +87,7 @@ class CloudflareTransport(httpx.BaseTransport):
                 time.sleep(2)
                 continue
             try:
-                return self.transport.handle_request(_routed_request(request, address))
+                return self.transport.handle_request(_routed_request(request, address, self.host))
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 self.routes.invalidate(address)
                 excluded.append(address)
@@ -97,6 +101,7 @@ class CloudflareTransport(httpx.BaseTransport):
 class AsyncCloudflareTransport(httpx.AsyncBaseTransport):
     def __init__(self, routes):
         self.routes = routes
+        self.host = getattr(routes, "host", HOST)
         self.transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=0)
 
     async def handle_async_request(self, request):
@@ -110,7 +115,7 @@ class AsyncCloudflareTransport(httpx.AsyncBaseTransport):
                 await asyncio.sleep(2)
                 continue
             try:
-                return await self.transport.handle_async_request(_routed_request(request, address))
+                return await self.transport.handle_async_request(_routed_request(request, address, self.host))
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 await asyncio.to_thread(self.routes.invalidate, address)
                 excluded.append(address)

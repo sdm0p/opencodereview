@@ -32,6 +32,16 @@ def test_gateway_uses_cloudflare_model_and_disables_cache_and_logs(monkeypatch):
     assert model.rate_limiter is llm_factory._cloudflare_limiter
 
 
+def test_gateway_supports_a_separate_gateway_token(monkeypatch):
+    monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'workers-ai-token')
+    monkeypatch.setenv('CLOUDFLARE_GATEWAY_TOKEN', 'gateway-run-token')
+    monkeypatch.setenv('CLOUDFLARE_ACCOUNT_ID', 'a' * 32)
+    monkeypatch.setenv('CLOUDFLARE_GATEWAY_ID', 'default')
+    model = llm_factory._get_cloudflare_chat()
+    assert model.default_headers['cf-aig-authorization'] == 'Bearer gateway-run-token'
+    assert model.openai_api_key.get_secret_value() == 'workers-ai-token'
+
+
 def test_daily_budget_rejects_additional_attempts():
     limiter = llm_factory.CloudflareRateLimiter(daily_limit=2)
     limiter._reserve()
@@ -57,6 +67,17 @@ def test_routing_keeps_host_and_tls_server_name():
     assert routed.headers['Authorization'] == 'Bearer test-key'
     with pytest.raises(ValueError):
         _routed_request(httpx.Request('POST', 'https://elsewhere.example/'), '192.0.2.1')
+
+
+def test_gateway_routing_keeps_its_host_and_tls_server_name():
+    original = httpx.Request('POST', 'https://gateway.ai.cloudflare.com/v1/acct/default/compat/chat/completions',
+                             headers={'Authorization': 'Bearer test-key'}, content=b'{}')
+    routed = _routed_request(original, '192.0.2.1', 'gateway.ai.cloudflare.com')
+    assert routed.url.host == '192.0.2.1'
+    assert routed.headers['Host'] == 'gateway.ai.cloudflare.com'
+    assert routed.extensions['sni_hostname'] == 'gateway.ai.cloudflare.com'
+    with pytest.raises(ValueError):
+        _routed_request(original, '192.0.2.1', 'not-cloudflare.example')
 
 
 def test_transport_tries_another_route_only_for_connect_failure():

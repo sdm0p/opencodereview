@@ -74,6 +74,8 @@ Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` to use Workers AI's `@cf/
 
 When the direct Workers AI API is unreachable, set `CLOUDFLARE_GATEWAY_ID` to an AI Gateway ID (for example `default`) to route through Cloudflare AI Gateway. The app requests that gateway cache and stored logs be skipped. Gateway-level Logpush and account policies may still apply; review them before sending private code. Cloudflare's OpenAI-compatible gateway endpoint is marked deprecated, so this route should be migrated when Cloudflare provides a replacement reachable from the deployment environment.
 
+The gateway route can use a separate `CLOUDFLARE_GATEWAY_TOKEN`, sent only as the gateway authorization token; `CLOUDFLARE_API_TOKEN` remains the Workers AI provider credential. This is useful when the Workers AI token cannot also run requests through the gateway. Store both as deployment secrets, never in the repository. Cloudflare gateway Run permission can apply account-wide, so grant only the access you intend. A gateway's first-time creation and permissions may need to be completed in the Cloudflare dashboard.
+
 Retrieval is optional. It uses ChromaDB with local embeddings when enabled; the hosted workflow can continue with the pull request diff when retrieval is disabled or unavailable. The index is selective and revision-aware, rather than a blind copy of every repository file.
 
 ## Try it locally
