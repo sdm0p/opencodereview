@@ -65,3 +65,22 @@ def test_transport_tries_another_route_only_for_connect_failure():
         response = client.post('https://api.cloudflare.com/example', json={})
     assert response.status_code == 200
     assert routes.invalidated == ['192.0.2.1']
+
+
+def test_transport_rechecks_when_no_route_is_temporarily_reachable(monkeypatch):
+    monkeypatch.setattr('backend.integrations.cloudflare_transport.time.sleep', lambda _: None)
+    class Routes:
+        calls = 0
+        def select(self, excluded):
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ConnectError('No route')
+            return '192.0.2.1'
+        def invalidate(self, address):
+            raise AssertionError('reachable route should not be invalidated')
+    routes = Routes()
+    transport = CloudflareTransport(routes)
+    transport.transport = httpx.MockTransport(lambda request: httpx.Response(200))
+    with httpx.Client(transport=transport) as client:
+        assert client.get('https://api.cloudflare.com/example').status_code == 200
+    assert routes.calls == 2

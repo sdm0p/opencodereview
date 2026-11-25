@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 import socket
 import ssl
 import threading
@@ -12,6 +13,7 @@ import httpx
 
 
 HOST = "api.cloudflare.com"
+logger = logging.getLogger(__name__)
 
 
 class ReachableCloudflareRoutes:
@@ -44,6 +46,7 @@ class ReachableCloudflareRoutes:
                 routes = [route for future in as_completed(futures) if (route := future.result())]
             self._routes = routes
             self._expires = time.monotonic() + 60
+            logger.info("Cloudflare route check: %d candidates, %d verified", len(addresses), len(routes))
             if not routes:
                 raise httpx.ConnectError("No verified Cloudflare IPv4 route was reachable")
             return routes[0]
@@ -72,7 +75,13 @@ class CloudflareTransport(httpx.BaseTransport):
     def handle_request(self, request):
         excluded = []
         for attempt in range(3):
-            address = self.routes.select(excluded)
+            try:
+                address = self.routes.select(excluded)
+            except httpx.ConnectError:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
+                continue
             try:
                 return self.transport.handle_request(_routed_request(request, address))
             except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -93,7 +102,13 @@ class AsyncCloudflareTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request):
         excluded = []
         for attempt in range(3):
-            address = await asyncio.to_thread(self.routes.select, excluded)
+            try:
+                address = await asyncio.to_thread(self.routes.select, excluded)
+            except httpx.ConnectError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2)
+                continue
             try:
                 return await self.transport.handle_async_request(_routed_request(request, address))
             except (httpx.ConnectError, httpx.ConnectTimeout):
