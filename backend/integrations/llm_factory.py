@@ -55,7 +55,6 @@ class CloudflareRateLimiter(BaseRateLimiter):
 # a conservative application cap, not a measurement of Cloudflare neurons.
 _cloudflare_limiter = CloudflareRateLimiter(max(1, int(os.getenv("CLOUDFLARE_DAILY_REQUEST_LIMIT", "50"))))
 _cloudflare_routes = ReachableCloudflareRoutes()
-_cloudflare_gateway_routes = ReachableCloudflareRoutes("gateway.ai.cloudflare.com")
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "60"))
 DEFAULT_OUTPUT_TOKENS = int(os.getenv("OCR_MODEL_MAX_OUTPUT_TOKENS", "2000"))
@@ -143,8 +142,11 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
         headers = dict(kwargs.pop("default_headers", {}) or {})
         headers.update({"cf-aig-authorization": f"Bearer {gateway_token or api_key}", "cf-aig-collect-log": "false", "cf-aig-skip-cache": "true"})
         kwargs["default_headers"] = headers
-        kwargs.setdefault("http_client", httpx.Client(transport=CloudflareTransport(_cloudflare_gateway_routes), timeout=timeout))
-        kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=AsyncCloudflareTransport(_cloudflare_gateway_routes), timeout=timeout))
+        # The gateway's hostname route was reachable with normal TLS/SNI, while
+        # pinning its resolved IPs produced intermittent connect errors from HF.
+        # Let HTTPX resolve the official hostname and retry connection setup.
+        kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(retries=2), timeout=timeout))
+        kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=2), timeout=timeout))
         base_url = f"https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat"
     else:
         kwargs.setdefault("http_client", httpx.Client(transport=CloudflareTransport(_cloudflare_routes), timeout=timeout))
