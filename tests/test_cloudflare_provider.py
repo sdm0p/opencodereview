@@ -1,7 +1,9 @@
 import pytest
+import httpx
 
 from backend.integrations import llm_factory
 from eval_data.ragas_eval import ragas_time_limits
+from backend.integrations.cloudflare_transport import CloudflareTransport, _routed_request
 
 
 def test_cloudflare_default_and_shared_pacing(monkeypatch):
@@ -30,3 +32,36 @@ def test_cloudflare_evaluation_has_room_for_paced_calls(monkeypatch):
     monkeypatch.setenv('OCR_RAGAS_METRIC_TIMEOUT_SECONDS', '12')
     assert ragas_time_limits('Cloudflare') == (210, 150)
     assert ragas_time_limits('Gemini') == (30, 12)
+
+
+def test_routing_keeps_host_and_tls_server_name():
+    original = httpx.Request('POST', 'https://api.cloudflare.com/client/v4/accounts/test/ai/v1/chat/completions',
+                             headers={'Authorization': 'Bearer test-key'}, content=b'{}')
+    routed = _routed_request(original, '192.0.2.1')
+    assert routed.url.host == '192.0.2.1'
+    assert routed.headers['Host'] == 'api.cloudflare.com'
+    assert routed.extensions['sni_hostname'] == 'api.cloudflare.com'
+    assert routed.headers['Authorization'] == 'Bearer test-key'
+    with pytest.raises(ValueError):
+        _routed_request(httpx.Request('POST', 'https://elsewhere.example/'), '192.0.2.1')
+
+
+def test_transport_tries_another_route_only_for_connect_failure():
+    class Routes:
+        def __init__(self):
+            self.invalidated = []
+        def select(self, excluded):
+            return '192.0.2.1' if not excluded else '192.0.2.2'
+        def invalidate(self, address):
+            self.invalidated.append(address)
+    routes = Routes()
+    transport = CloudflareTransport(routes)
+    def respond(request):
+        if request.url.host == '192.0.2.1':
+            raise httpx.ConnectError('connection failed')
+        return httpx.Response(200, json={'ok': True})
+    transport.transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as client:
+        response = client.post('https://api.cloudflare.com/example', json={})
+    assert response.status_code == 200
+    assert routes.invalidated == ['192.0.2.1']

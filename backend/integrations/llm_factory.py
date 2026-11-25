@@ -9,6 +9,7 @@ import time
 from collections import deque
 from typing import Any, Optional
 from langchain_core.rate_limiters import BaseRateLimiter, InMemoryRateLimiter
+from backend.integrations.cloudflare_transport import CloudflareTransport, AsyncCloudflareTransport, ReachableCloudflareRoutes
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class CloudflareRateLimiter(BaseRateLimiter):
 # Shared by reviewers and evaluation in this process. This request budget is
 # a conservative application cap, not a measurement of Cloudflare neurons.
 _cloudflare_limiter = CloudflareRateLimiter(max(1, int(os.getenv("CLOUDFLARE_DAILY_REQUEST_LIMIT", "50"))))
+_cloudflare_routes = ReachableCloudflareRoutes()
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = float(os.getenv("OCR_MODEL_TIMEOUT_SECONDS", "60"))
 DEFAULT_OUTPUT_TOKENS = int(os.getenv("OCR_MODEL_MAX_OUTPUT_TOKENS", "2000"))
@@ -127,8 +129,8 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
     # Retry only failures while establishing a connection, before an HTTP
     # request is sent. Preserve normal TLS certificate and hostname checks.
     # IPv6 is unavailable on the hosted Space; keep DNS and TLS SNI intact.
-    kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=5), timeout=timeout))
-    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=5), timeout=timeout))
+    kwargs.setdefault("http_client", httpx.Client(transport=CloudflareTransport(_cloudflare_routes), timeout=timeout))
+    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=AsyncCloudflareTransport(_cloudflare_routes), timeout=timeout))
     kwargs["timeout"] = timeout
     kwargs.setdefault("max_retries", 0)
     kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or DEFAULT_OUTPUT_TOKENS), 4096)
