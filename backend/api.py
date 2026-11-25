@@ -36,28 +36,7 @@ from backend.integrations.endpoints import register_endpoint, unregister_endpoin
 app = FastAPI(title="OpenCodeReview API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
-def _temporary_host_probe():
-    """Compare verified public TLS routes without sending credentials."""
-    import socket
-    import ssl
-    from concurrent.futures import ThreadPoolExecutor
-    def check(host, ip):
-        try:
-            with socket.create_connection((ip, 443), timeout=4) as conn:
-                with ssl.create_default_context().wrap_socket(conn, server_hostname=host):
-                    return True
-        except OSError:
-            return False
-    for host in ("api.cloudflare.com", "gateway.ai.cloudflare.com", "generativelanguage.googleapis.com"):
-        try:
-            ips = list(dict.fromkeys(x[4][0] for x in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)))[:8]
-            with ThreadPoolExecutor(max_workers=max(1, len(ips))) as pool:
-                ok = sum(pool.map(lambda ip: check(host, ip), ips))
-            logger.warning("Host diagnostic: host=%s candidates=%d verified=%d", host, len(ips), ok)
-        except Exception as exc:
-            logger.warning("Host diagnostic: host=%s error=%s", host, type(exc).__name__)
 
-threading.Thread(target=_temporary_host_probe, daemon=True).start()
 
 
 

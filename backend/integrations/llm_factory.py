@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -119,8 +120,13 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
     """Use Workers AI when an account ID and API token are configured."""
     api_key = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    gateway_id = os.environ.get("CLOUDFLARE_GATEWAY_ID", "").strip()
     if not api_key or not account_id:
         return None
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", account_id):
+        raise ValueError("CLOUDFLARE_ACCOUNT_ID must be a 32-character hexadecimal account ID.")
+    if gateway_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", gateway_id):
+        raise ValueError("CLOUDFLARE_GATEWAY_ID contains invalid characters.")
     from langchain_openai import ChatOpenAI
     import httpx
     timeout = kwargs.pop("timeout", DEFAULT_REQUEST_TIMEOUT)
@@ -129,15 +135,29 @@ def _get_cloudflare_chat(**kwargs: Any) -> Optional[Any]:
     # Retry only failures while establishing a connection, before an HTTP
     # request is sent. Preserve normal TLS certificate and hostname checks.
     # IPv6 is unavailable on the hosted Space; keep DNS and TLS SNI intact.
-    kwargs.setdefault("http_client", httpx.Client(transport=CloudflareTransport(_cloudflare_routes), timeout=timeout))
-    kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=AsyncCloudflareTransport(_cloudflare_routes), timeout=timeout))
+    if gateway_id:
+        # Cloudflare's AI Gateway is an official alternate route to Workers AI.
+        # Request no gateway cache or stored logs for potentially private code.
+        headers = dict(kwargs.pop("default_headers", {}) or {})
+        headers.update({"cf-aig-authorization": f"Bearer {api_key}", "cf-aig-collect-log": "false", "cf-aig-skip-cache": "true"})
+        kwargs["default_headers"] = headers
+        kwargs.setdefault("http_client", httpx.Client(transport=httpx.HTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
+        kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2), timeout=timeout))
+        base_url = f"https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat"
+    else:
+        kwargs.setdefault("http_client", httpx.Client(transport=CloudflareTransport(_cloudflare_routes), timeout=timeout))
+        kwargs.setdefault("http_async_client", httpx.AsyncClient(transport=AsyncCloudflareTransport(_cloudflare_routes), timeout=timeout))
+        base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
     kwargs["timeout"] = timeout
     kwargs.setdefault("max_retries", 0)
     kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or DEFAULT_OUTPUT_TOKENS), 4096)
     kwargs.setdefault("reasoning_effort", "low")
     kwargs.setdefault("rate_limiter", _cloudflare_limiter)
-    return ChatOpenAI(model=kwargs.pop("model", CLOUDFLARE_MODEL), api_key=api_key,
-                      base_url=f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+    model = kwargs.pop("model", CLOUDFLARE_MODEL)
+    if gateway_id and model.startswith("@cf/"):
+        model = f"workers-ai/{model}"
+    return ChatOpenAI(model=model, api_key=api_key,
+                      base_url=base_url,
                       temperature=kwargs.pop("temperature", DEFAULT_TEMPERATURE), **kwargs)
 
 

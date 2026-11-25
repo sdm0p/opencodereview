@@ -53,7 +53,7 @@ def invoke_review(llm, schema, messages, mode="thorough"):
     underlying connections; timed-out workers never modify graph state.
     """
     budget = reviewer_timeout(mode)
-    if str(getattr(llm, "model_name", "")).startswith("@cf/"):
+    if str(getattr(llm, "model_name", "")).removeprefix("workers-ai/").startswith("@cf/"):
         budget = max(budget, float(os.getenv("OCR_CLOUDFLARE_REVIEWER_TIMEOUT_SECONDS", "180")))
     deadline = time.monotonic() + budget
     instructions = (

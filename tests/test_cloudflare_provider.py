@@ -8,15 +8,28 @@ from backend.integrations.cloudflare_transport import CloudflareTransport, _rout
 
 def test_cloudflare_default_and_shared_pacing(monkeypatch):
     monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'test-key')
-    monkeypatch.setenv('CLOUDFLARE_ACCOUNT_ID', 'test-account')
+    monkeypatch.setenv('CLOUDFLARE_ACCOUNT_ID', 'a' * 32)
+    monkeypatch.delenv('CLOUDFLARE_GATEWAY_ID', raising=False)
     model = llm_factory._get_cloudflare_chat()
     assert model.model_name == '@cf/zai-org/glm-4.7-flash'
-    assert str(model.openai_api_base) == 'https://api.cloudflare.com/client/v4/accounts/test-account/ai/v1'
+    assert str(model.openai_api_base) == f'https://api.cloudflare.com/client/v4/accounts/{"a" * 32}/ai/v1'
     assert model.max_retries == 0
     assert model.max_tokens >= 4096
     assert model.reasoning_effort == 'low'
     assert model.rate_limiter is llm_factory._cloudflare_limiter
     assert llm_factory.create_llm().rate_limiter is model.rate_limiter
+
+
+def test_gateway_uses_cloudflare_model_and_disables_cache_and_logs(monkeypatch):
+    monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'test-key')
+    monkeypatch.setenv('CLOUDFLARE_ACCOUNT_ID', 'a' * 32)
+    monkeypatch.setenv('CLOUDFLARE_GATEWAY_ID', 'default')
+    model = llm_factory._get_cloudflare_chat()
+    assert model.model_name == 'workers-ai/@cf/zai-org/glm-4.7-flash'
+    assert str(model.openai_api_base) == f'https://gateway.ai.cloudflare.com/v1/{"a" * 32}/default/compat'
+    assert model.default_headers['cf-aig-collect-log'] == 'false'
+    assert model.default_headers['cf-aig-skip-cache'] == 'true'
+    assert model.rate_limiter is llm_factory._cloudflare_limiter
 
 
 def test_daily_budget_rejects_additional_attempts():

@@ -72,6 +72,8 @@ The model factory supports Cloudflare Workers AI, Groq and Google Gemini, plus c
 
 Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` to use Workers AI's `@cf/zai-org/glm-4.7-flash` by default for automatic reviews and evaluation. `CLOUDFLARE_MODEL` can override the model, and `CLOUDFLARE_DAILY_REQUEST_LIMIT` sets a conservative local rolling request budget (default 50). Calls are paced to one every five seconds and automatic provider retries are disabled. This per-process request budget resets on restart and does not measure Cloudflare's neuron usage or enforce account-wide limits. See [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) and [limits](https://developers.cloudflare.com/workers-ai/platform/limits/).
 
+When the direct Workers AI API is unreachable, set `CLOUDFLARE_GATEWAY_ID` to an AI Gateway ID (for example `default`) to route through Cloudflare AI Gateway. The app requests that gateway cache and stored logs be skipped. Gateway-level Logpush and account policies may still apply; review them before sending private code. Cloudflare's OpenAI-compatible gateway endpoint is marked deprecated, so this route should be migrated when Cloudflare provides a replacement reachable from the deployment environment.
+
 Retrieval is optional. It uses ChromaDB with local embeddings when enabled; the hosted workflow can continue with the pull request diff when retrieval is disabled or unavailable. The index is selective and revision-aware, rather than a blind copy of every repository file.
 
 ## Try it locally
