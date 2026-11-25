@@ -171,4 +171,4 @@ OpenCodeReview is a practical AI engineering project for human-reviewed code rev
 
 ## License
 
-No license file is currently included in this repository.
+This project is licensed under the [MIT License](LICENSE).
