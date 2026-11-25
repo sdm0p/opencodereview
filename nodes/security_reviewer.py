@@ -14,8 +14,6 @@ from backend.state import Finding, OpenCodeReviewState
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_TEMPERATURE = 0.0
 MAX_CONTEXT_CHARS = 6_000
 MAX_FILE_CONTENT_CHARS = 4_000
 

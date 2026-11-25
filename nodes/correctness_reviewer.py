@@ -15,10 +15,6 @@ from backend.state import Finding, OpenCodeReviewState, Severity
 
 logger = logging.getLogger(__name__)
 
-# Model used on Groq — good at function calling / structured output
-GROQ_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_TEMPERATURE = 0.0
-
 # Prompt version — tied to the file on disk
 PROMPT_VERSION = "v1"
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / f"correctness_{PROMPT_VERSION}.txt"

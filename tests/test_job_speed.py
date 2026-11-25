@@ -58,7 +58,7 @@ def scheduler():
               os=SimpleNamespace(getenv=lambda *a: ''), requests=SimpleNamespace(get=Mock()),
               _jobs={}, _lock=threading.Lock(), _save_job=Mock(), _executor=SimpleNamespace(submit=Mock()),
               _run_job=Mock(), _load_job=Mock(return_value=None), _authorize_request=Mock(), _rate_limit=Mock(),
-              _session=lambda request: {'github_id': request.owner}, _with_ragas=lambda job: dict(job))
+              _session=lambda request: {'github_id': request.owner})
     ns['requests'].RequestException = RuntimeError
     ns['requests'].get.return_value.json.return_value = {'head': {'sha': 'a'*40}, 'base': {'sha': 'b'*40}}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'backend/api.py', 'exec'), ns)

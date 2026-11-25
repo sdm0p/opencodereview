@@ -86,7 +86,7 @@ RECOMMENDATION_ICONS = {
 # Default dropdown choice shown in the UI.  Gradio 6's Dropdown has no
 # placeholder support, so a real choice is displayed and mapped back to
 # the "" (auto) sentinel wherever the value enters the pipeline.
-AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq fallback)"
+AUTO_ENDPOINT_CHOICE = "Auto (Gemini → Groq → Cloudflare)"
 
 
 def _normalize_endpoint_name(endpoint_name: str | None) -> str:
@@ -134,8 +134,8 @@ def _build_and_stream(
         (``OCR_ENDPOINT_*``).  Empty string uses the built-in provider.
     ragas_background : bool
         When True, RAGAS scoring runs on a background daemon thread and the
-        fourth return element is a task id (str) to poll instead of the
-        scores dict — so the UI can show results immediately.
+        evaluation continues without delaying or changing the user-facing
+        review results.
     """
     graph = build_graph(DB_PATH)
     thread_id = str(uuid.uuid4())
@@ -198,11 +198,8 @@ def _build_and_stream(
 
         state = graph.get_state(config)
 
-        # ── Log verdict/findings scores and capture trace_id ───────
-        # Capture trace_id NOW (immediately after graph completes)
-        # so it can be used after the long-running RAGAS computation.
-        # _resolve_langfuse_trace_id() can return None after ~60s delays
-        # because contextvars may be lost.
+        # Capture the trace ID before background RAGAS scoring so its scores
+        # can be attached to this review in Langfuse.
         run_trace_id = _resolve_langfuse_trace_id(handler)
 
         verdict = state.values.get("verdict")
@@ -227,7 +224,10 @@ def _build_and_stream(
         # Background mode spawns a thread and returns a task id so the UI
         # can render results immediately; sync mode (CLI/health) waits.
         ragas_out: dict[str, float | None] | str = {}
-        ragas_inputs = _ragas_inputs_from_state(state, endpoint_name)
+        ragas_inputs = None
+        run_ragas = os.getenv("OCR_RUN_RAGAS_ON_REVIEWS", "").strip().lower() in {"1", "true", "yes"}
+        if run_ragas:
+            ragas_inputs = _ragas_inputs_from_state(state, endpoint_name)
         if ragas_inputs:
             if ragas_background:
                 # handler is not shared across threads (langfuse contextvars
@@ -341,105 +341,7 @@ def _format_verdict(verdict: Verdict | None) -> str:
     )
 
 
-RAGAS_METRIC_LABELS = {
-    "context_precision": "Context Precision",
-    "context_recall": "Context Recall",
-    "faithfulness": "Faithfulness",
-    "answer_relevancy": "Answer Relevancy",
-    "mmr": "Mean Reciprocal Rank",
-}
-
-RAGAS_METRIC_TOOLTIPS = {
-    "context_precision": "Are the most relevant code chunks ranked first?",
-    "context_recall": "Did we find ALL the relevant code? (requires ground truth)",
-    "faithfulness": "Does the review answer stick to the retrieved code?",
-    "answer_relevancy": "Does the review address the PR diff?",
-    "mmr": "How early in the list does the first useful chunk appear?",
-}
-
-
-def _format_ragas_scores(scores: dict[str, float | None]) -> str:
-    """Build an HTML card showing RAGAS retrieval quality metrics."""
-    if not scores:
-        return ""
-
-    def _score_color(val: float) -> str:
-        if val >= 0.8:
-            return "#16a34a"
-        elif val >= 0.5:
-            return "#ca8a04"
-        else:
-            return "#dc2626"
-
-    rows: list[str] = []
-    failed = 0
-    for key, value in scores.items():
-        label = RAGAS_METRIC_LABELS.get(key, key.replace("_", " ").title())
-        tooltip = RAGAS_METRIC_TOOLTIPS.get(key, "")
-        tip_html = (
-            f'<span class="tip" title="{tooltip}">ℹ️</span>' if tooltip else ""
-        )
-        if value is None:
-            failed += 1
-            rows.append(
-                f'<div class="metric-row">'
-                f'<span class="metric-label">{label} {tip_html}</span>'
-                f'<span class="metric-value muted">N/A — failed</span>'
-                f"</div>"
-            )
-            continue
-        color = _score_color(value)
-        pct = int(value * 100)
-        rows.append(
-            f'<div class="metric-row">'
-            f'<span class="metric-label">{label} {tip_html}</span>'
-            f'<span class="metric-value" style="color:{color}">{value:.3f}</span>'
-            f"</div>"
-            f'<div class="metric-track"><div class="metric-fill" style="width:{pct}%;background:{color}"></div></div>'
-        )
-
-    note = ""
-    if failed:
-        note = (
-            '<p class="muted small" style="margin:10px 0 0">'
-            f"{failed} metric(s) failed (likely LLM rate-limited) and are shown as N/A."
-            "</p>"
-        )
-
-    return (
-        '<div class="ocr-card">'
-        '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
-        + "".join(rows)
-        + note
-        + "</div>"
-    )
-
-
-RAGAS_PENDING_HTML = (
-    '<div class="ocr-card">'
-    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
-    '<div class="loading-spinner" style="justify-content:flex-start;padding:10px 0">'
-    '<div class="spinner"></div>'
-    '<span class="label">Computing RAGAS scores in the background…</span>'
-    "</div>"
-    "</div>"
-)
-
-RAGAS_FAILED_HTML = (
-    '<div class="ocr-card">'
-    '<div class="card-title">📊 Retrieval Quality (RAGAS)</div>'
-    '<p class="muted small">N/A — RAGAS scoring failed '
-    "(likely LLM rate-limited or timed out). Check the logs for details.</p>"
-    "</div>"
-)
-
-# After this long a background RAGAS task is considered stalled and the
-# placeholder is replaced with the failure card instead of spinning forever.
-RAGAS_TIMEOUT_SECONDS = 600
-
-# Background RAGAS task registry: the UI spawns scoring on a daemon thread
-# and a gr.Timer polls this dict, so review results render immediately
-# instead of waiting minutes for the RAGAS LLM calls.
+# Background evaluation results remain internal and are sent to observability.
 _ragas_tasks: dict[str, dict] = {}
 _ragas_lock = threading.Lock()
 
@@ -612,7 +514,7 @@ def _spawn_ragas_background(
     handler,
     result_callback=None,
 ) -> str:
-    """Start RAGAS scoring on a daemon thread; return a task id to poll."""
+    """Start background RAGAS scoring and return its internal task id."""
     task_id = f"ragas-{uuid.uuid4().hex[:12]}"
     with _ragas_lock:
         _ragas_tasks[task_id] = {"done": False, "scores": None, "started": time.time()}
@@ -914,14 +816,14 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
 
         ep = get_endpoint(endpoint_name)
         if ep is None:
-            yield [None, None, None, None, None, None], (
+            yield [None, None, None, None, None], (
                 f"❌ Endpoint '{endpoint_name}' not found — pick one from "
                 "the list or add it in the form above."
             )
             return
         if ep.builtin and not ep.api_key:
             key_var = "GEMINI_API_KEY" if ep.name == "Gemini" else "GROQ_API_KEY"
-            yield [None, None, None, None, None, None], (
+            yield [None, None, None, None, None], (
                 f"❌ Endpoint '{ep.name}' is selected but its key is not set — "
                 f"add `{key_var}` as a Space secret, or add a custom endpoint "
                 "in the form above."
@@ -934,12 +836,12 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
 
     t0 = time.time()
     try:
-        state, config, cost_summary, ragas_out, _ragas_inputs = _build_and_stream(
+        state, config, cost_summary, _ragas_out, _ragas_inputs = _build_and_stream(
             repo.strip(), int(pr_number), endpoint_name, ragas_background=True,
         )
     except Exception as exc:
         log_error_to_backends(exc, context={"source": "gradio_ui", "phase": "run_review", "repo": repo, "pr_number": pr_number})
-        yield ([None, None, None, None, None, None], f"❌ Review failed: {exc}")
+        yield ([None, None, None, None, None], f"❌ Review failed: {exc}")
         return
 
     duration = time.time() - t0
@@ -948,7 +850,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     values = state.values
 
     if not tasks:
-        yield [None, None, None, None, None, None], "ℹ️ Review completed without findings."
+        yield [None, None, None, None, None], "ℹ️ Review completed without findings."
         return
 
     verdict: Verdict | None = values.get("verdict")
@@ -957,12 +859,6 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     progress(0.8, desc="Formatting results…")
 
     verdict_html = _format_verdict(verdict)
-    if isinstance(ragas_out, str):
-        ragas_task_id = ragas_out
-        ragas_html = RAGAS_PENDING_HTML
-    else:
-        ragas_task_id = ""
-        ragas_html = _format_ragas_scores(ragas_out)
     findings_html = _format_findings_table(findings)
     count_html = _format_findings_count(findings)
     # Strip non-serializable callbacks before saving config to state
@@ -975,7 +871,7 @@ def run_review(repo: str, pr_number: int, endpoint_name: str = "", progress=gr.P
     )
 
     yield (
-        [run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id],
+        [run_summary_html, verdict_html, count_html, findings_html, config_json],
         None,
     )
 
@@ -1322,14 +1218,6 @@ code { background: var(--bg-card-alt); padding: 1px 6px; border-radius: 6px; fon
 .score-track { height: 10px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; margin-top: 4px; }
 .score-fill { height: 100%; border-radius: 999px; transition: width 0.7s ease; }
 
-/* ── RAGAS metrics ───────────────────────────────────────────────── */
-.metric-row { display: flex; justify-content: space-between; align-items: center; margin: 8px 0 4px; }
-.metric-label { font-weight: 600; color: var(--text-secondary); font-size: 0.93em; }
-.metric-value { font-weight: 800; font-size: 0.98em; }
-.metric-track { height: 8px; background: var(--spinner-track); border-radius: 999px; overflow: hidden; }
-.metric-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease; }
-.tip { cursor: help; font-size: 0.85em; }
-
 /* ── Findings table ──────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
 thead tr { background: var(--bg-table-header); border-bottom: 2px solid var(--border-color); }
@@ -1412,7 +1300,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 f'<div class="chips-row" style="margin-top:8px">'
                 f'<span class="key-chip ok">{len(_configured_endpoints)} endpoint'
                 f'{"s" if len(_configured_endpoints) != 1 else ""} configured</span>'
-                '<span class="key-chip">Built-ins: Gemini · Groq</span>'
+                '<span class="key-chip">Built-ins: Gemini · Groq · Cloudflare</span>'
                 '<span class="key-chip">Bring your own keys</span>'
                 '</div>'
                 '</div>'
@@ -1425,10 +1313,6 @@ with gr.Blocks(title="OpenCodeReview") as demo:
     # ── State ────────────────────────────────────────────────────────────
     pr_state = gr.State()
     smoke_state = gr.State()
-    # Id of this session's background RAGAS task — the gr.Timer below polls
-    # it so review results render immediately instead of waiting on RAGAS.
-    ragas_task_state = gr.State(value="")
-
     # ── Tab: Review ──────────────────────────────────────────────────
     with gr.Tab("Review"):
         with gr.Row():
@@ -1451,8 +1335,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 value=AUTO_ENDPOINT_CHOICE,
                 label="LLM Endpoint",
                 info=(
-                    "Built-ins: Gemini and Groq (Groq serves Llama models). "
-                    "Defaults to Gemini → Groq fallback."
+                    "Built-ins: Gemini, Groq (Llama models), and Cloudflare Workers AI. "
+                    "Automatic order: Gemini → Groq → Cloudflare."
                 ),
                 # Grouped optgroup choices make Gradio's strict membership
                 # check reject values that sit inside a group (e.g. a custom
@@ -1471,7 +1355,7 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             endpoint_name = _normalize_endpoint_name(endpoint_name)
             if not endpoint_name:
                 return (
-                    "ℹ️ Leave the endpoint empty for auto (Gemini → Groq fallback), "
+                    "ℹ️ Leave the endpoint empty for auto (Gemini → Groq → Cloudflare), "
                     "or pick one and test it here."
                 )
             from backend.integrations.endpoints import get_endpoint
@@ -1550,7 +1434,6 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             verdict_display = gr.HTML()
             count_display = gr.HTML()
             findings_display = gr.HTML()
-            ragas_display = gr.HTML()
 
             with gr.Row():
                 approve_btn = gr.Button("Approve & post", variant="primary")
@@ -1565,20 +1448,16 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 _normalize_endpoint_name(a) if isinstance(a, str) else a
                 for a in args
             )
-            # Yield initial loading state — must match the 12 outputs of
-            # run_btn.click in order (loading_box, cancel_btn, run_btn,
-            # status_msg, 5 result displays, pr_state, results_panel,
-            # ragas_task_state).
+            # Yield the initial state for run_btn.click's 10 outputs.
             yield [
                 gr.update(visible=True),
                 gr.update(visible=True, variant="stop"),
                 gr.update(visible=False),
                 gr.update(visible=False, value=""),
                 gr.update(value=""),
-                *[None, None, None, None],
+                *[None, None, None],
                 None,
                 gr.update(visible=False),
-                gr.update(value=""),
             ]
 
             for result, err in run_review(*args):
@@ -1589,13 +1468,12 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                         gr.update(visible=True),
                         gr.update(visible=True, value=err),
                         gr.update(value=""),
-                        *[None, None, None, None],
+                        *[None, None, None],
                         None,
                         gr.update(visible=False),
-                        gr.update(value=""),
                     ]
                 else:
-                    run_summary_html, verdict_html, findings_html, count_html, ragas_html, config_json, ragas_task_id = result
+                    run_summary_html, verdict_html, count_html, findings_html, config_json = result
                     yield [
                         gr.update(visible=False),
                         gr.update(visible=False),
@@ -1605,10 +1483,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                         gr.update(value=verdict_html),
                         gr.update(value=count_html),
                         gr.update(value=findings_html),
-                        gr.update(value=ragas_html),
                         config_json,
                         gr.update(visible=True),
-                        gr.update(value=ragas_task_id),
                     ]
 
         run_event = run_btn.click(
@@ -1623,10 +1499,8 @@ with gr.Blocks(title="OpenCodeReview") as demo:
                 verdict_display,
                 count_display,
                 findings_display,
-                ragas_display,
                 pr_state,
                 results_panel,
-                ragas_task_state,
             ],
         )
         cancel_btn.click(fn=None, cancels=[run_event])
@@ -1648,44 +1522,6 @@ with gr.Blocks(title="OpenCodeReview") as demo:
             fn=on_reject,
             inputs=[pr_state],
             outputs=[resume_msg],
-        )
-
-        # ── Background RAGAS polling ────────────────────────────────────
-        # RAGAS scoring runs on a background thread so the review results
-        # render immediately; this Timer polls for the finished scores and
-        # swaps the "computing…" placeholder for the metric card.
-        ragas_timer = gr.Timer(5, active=True)
-
-        def on_ragas_tick(task_id):
-            """Render background RAGAS scores when the task finishes."""
-            if not task_id:
-                return gr.update(), gr.update()
-            with _ragas_lock:
-                entry = _ragas_tasks.get(task_id)
-            if entry is None:
-                return gr.update(), gr.update()
-            if not entry.get("done"):
-                # Stalled guard: give up after the timeout instead of
-                # leaving the "computing…" placeholder forever.
-                started = entry.get("started") or 0
-                if time.time() - started > RAGAS_TIMEOUT_SECONDS:
-                    with _ragas_lock:
-                        _ragas_tasks.pop(task_id, None)
-                    return gr.update(value=RAGAS_FAILED_HTML), gr.update(value="")
-                return gr.update(), gr.update()
-            scores = entry.get("scores") or {}
-            with _ragas_lock:
-                _ragas_tasks.pop(task_id, None)
-            if scores:
-                html_out = _format_ragas_scores(scores)
-            else:
-                html_out = RAGAS_FAILED_HTML
-            return gr.update(value=html_out), gr.update(value="")
-
-        ragas_timer.tick(
-            fn=on_ragas_tick,
-            inputs=[ragas_task_state],
-            outputs=[ragas_display, ragas_task_state],
         )
 
         # ── Add / clear custom endpoints ─────────────────────────────

@@ -179,13 +179,13 @@ class _ThrottledChatModel:
         return getattr(self._model, name)
 
 
-def _wrap_evaluator(llm):
+def _wrap_evaluator(llm, timeout=12):
     from ragas.llms import LangchainLLMWrapper
     from ragas.run_config import RunConfig
-    return LangchainLLMWrapper(_ThrottledChatModel(llm), run_config=RunConfig(timeout=12, max_retries=1, max_wait=0, max_workers=1))
+    return LangchainLLMWrapper(_ThrottledChatModel(llm), run_config=RunConfig(timeout=max(1, int(timeout)), max_retries=0, max_wait=0, max_workers=1))
 
 
-def _get_evaluator_llm(endpoint: Optional[str] = None):
+def _get_evaluator_llm(endpoint: Optional[str] = None, *, timeout=12):
     """Return a RAGAS-compatible LLM, reusing the project's LLM factory.
 
     Priority:
@@ -208,29 +208,29 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             from backend.integrations.llm_factory import create_llm
             from backend.integrations.endpoints import EndpointConfig, get_endpoint
             configured = endpoint if isinstance(endpoint, EndpointConfig) else get_endpoint(endpoint)
-            timeout = 80 if getattr(configured, "name", "") == "Cloudflare" else 15
+            request_timeout = timeout
             if configured and not getattr(configured, "builtin", False) and configured.provider not in {"google", "anthropic"}:
                 import httpx
                 # LangChain caches HTTP clients for hashable timeout values.
                 # An unhashable Timeout forces a private pool for this loop.
-                timeout = httpx.Timeout(15)
-            llm = create_llm(endpoint=endpoint, temperature=0, timeout=timeout, max_retries=0)
+                request_timeout = httpx.Timeout(timeout)
+            llm = create_llm(endpoint=endpoint, temperature=0, timeout=request_timeout, max_retries=0)
             logger.info("RAGAS evaluator: using selected custom endpoint")
-            return _wrap_evaluator(llm)
+            return _wrap_evaluator(llm, timeout)
 
         from backend.integrations.llm_factory import _get_cloudflare_chat, _get_groq_chat, _get_gemini_chat
 
-        llm = _get_cloudflare_chat(temperature=0, max_retries=0, timeout=80)
+        llm = _get_cloudflare_chat(temperature=0, max_retries=0, timeout=timeout)
         if llm is not None:
             logger.info("RAGAS evaluator: using Cloudflare Workers AI")
-            return _wrap_evaluator(llm)
+            return _wrap_evaluator(llm, timeout)
 
         # Keep evaluation bounded: RAGAS runs several provider calls and
         # retrying each one can otherwise hold a review open for minutes.
         configured_model = os.getenv("RAGAS_MODEL", "").strip()
         if configured_model.startswith("groq/"):
             configured_model = configured_model.split("/", 1)[1]
-        groq_kwargs = {"temperature": 0, "max_retries": 0, "timeout": 15}
+        groq_kwargs = {"temperature": 0, "max_retries": 0, "timeout": timeout}
         if configured_model:
             groq_kwargs["model"] = configured_model
         llm = _get_groq_chat(**groq_kwargs)
@@ -238,7 +238,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             logger.info(
                 "RAGAS evaluator: GROQ_API_KEY not set — falling back to Gemini"
             )
-            llm = _get_gemini_chat(temperature=0, max_retries=0, timeout=15)
+            llm = _get_gemini_chat(temperature=0, max_retries=0, timeout=timeout)
         if llm is None:
             raise ValueError(
                 "No LLM available for RAGAS scoring. "
@@ -249,7 +249,7 @@ def _get_evaluator_llm(endpoint: Optional[str] = None):
             type(llm).__name__,
             _RAGAS_INTERVAL,
         )
-        return _wrap_evaluator(llm)
+        return _wrap_evaluator(llm, timeout)
     except ValueError as exc:
         logger.warning("RAGAS evaluator: %s", exc)
         raise RuntimeError(
@@ -291,8 +291,8 @@ def _safe_metric_error(exc):
 
 def ragas_time_limits(endpoint=None):
     """Account for paced, remote Cloudflare inference in both deadlines."""
-    total = max(1.0, float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "30")))
-    per_metric = max(.05, float(os.getenv("OCR_RAGAS_METRIC_TIMEOUT_SECONDS", "12")))
+    total = max(1.0, float(os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90")))
+    per_metric = max(.05, float(os.getenv("OCR_RAGAS_METRIC_TIMEOUT_SECONDS", "30")))
     name = endpoint if isinstance(endpoint, str) else getattr(endpoint, "name", "")
     uses_cloudflare = str(name).lower() == "cloudflare" or (
         not endpoint and bool(os.getenv("CLOUDFLARE_API_TOKEN") and os.getenv("CLOUDFLARE_ACCOUNT_ID"))
@@ -356,7 +356,9 @@ def compute_ragas_report(query, retrieved_contexts, ground_truth=None, answer=No
             try:
                 # Each metric runs its own asyncio loop. Sharing an async HTTP
                 # client across these threads can bind its pool to another loop.
-                llm = _get_evaluator_llm(endpoint=endpoint)
+                # Keep the provider request timeout and RAGAS RunConfig aligned
+                # with this metric's actual deadline.
+                llm = _get_evaluator_llm(endpoint=endpoint, timeout=limit)
                 value = _score_one_metric(metric, sample, llm, limit)
                 if not math.isfinite(value) or not 0 <= value <= 1:
                     raise ValueError("Invalid metric value")

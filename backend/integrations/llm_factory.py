@@ -268,7 +268,7 @@ def create_endpoint_llm(endpoint, **kwargs: Any) -> Any:
 
 
 def create_llm(endpoint=None, **kwargs: Any) -> Any:
-    """Create a chat LLM — selected endpoint first, else Cloudflare → Groq → Gemini.
+    """Create a chat LLM — selected endpoint first, else Gemini → Groq → Cloudflare.
 
     Parameters
     ----------
@@ -343,22 +343,22 @@ def create_llm(endpoint=None, **kwargs: Any) -> Any:
                 "or add it in the UI."
             )
 
-    llm = _get_cloudflare_chat(**kwargs)
-    if llm is not None:
-        return llm
-
-    # Prefer Groq when configured: it has a separate quota pool and avoids
-    # stalling the review pipeline on Gemini free-tier exhaustion.
-    llm = _get_groq_chat(**kwargs)
-    if llm is not None:
-        logger.debug("Using Groq (model=%s)", kwargs.get("model", GROQ_MODEL))
-        return llm
-
     llm = _get_gemini_chat(**kwargs)
     if llm is not None:
-        logger.debug("Falling back to Gemini (model=%s)", kwargs.get("model", GEMINI_MODEL))
+        logger.debug("Using Gemini (model=%s)", kwargs.get("model", GEMINI_MODEL))
+        return llm
+
+    llm = _get_groq_chat(**kwargs)
+    if llm is not None:
+        logger.debug("Falling back to Groq (model=%s)", kwargs.get("model", GROQ_MODEL))
+        return llm
+
+    llm = _get_cloudflare_chat(**kwargs)
+    if llm is not None:
+        logger.debug("Falling back to Cloudflare (model=%s)", kwargs.get("model", CLOUDFLARE_MODEL))
         return llm
 
     raise ValueError(
-        "No LLM available. Set GEMINI_API_KEY (primary) or GROQ_API_KEY (fallback)."
+        "No LLM available. Set GEMINI_API_KEY, GROQ_API_KEY, or both "
+        "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN."
     )

@@ -11,7 +11,7 @@ from eval_data.offline_regression import evaluate
 
 def prepare(monkeypatch):
     monkeypatch.setattr(ragas_eval, "_check_ragas", lambda: True)
-    monkeypatch.setattr(ragas_eval, "_get_evaluator_llm", lambda endpoint: object())
+    monkeypatch.setattr(ragas_eval, "_get_evaluator_llm", lambda endpoint, **kwargs: object())
     monkeypatch.setitem(sys.modules, "ragas.dataset_schema", SimpleNamespace(SingleTurnSample=lambda **kwargs: kwargs))
 
 
@@ -47,7 +47,7 @@ def test_no_context_is_not_a_zero_quality_measurement():
 def test_parallel_metrics_have_independent_evaluators(monkeypatch):
     prepare(monkeypatch)
     evaluators = []
-    def factory(endpoint):
+    def factory(endpoint, **kwargs):
         evaluator = object()
         evaluators.append(evaluator)
         return evaluator
@@ -57,6 +57,41 @@ def test_parallel_metrics_have_independent_evaluators(monkeypatch):
     assert len(evaluators) == 2
     assert evaluators[0] is not evaluators[1]
     assert len(report["scores"]) == 2
+
+
+def test_metric_deadline_is_passed_to_evaluator(monkeypatch):
+    prepare(monkeypatch)
+    timeouts = []
+    monkeypatch.setattr(
+        ragas_eval,
+        "_get_evaluator_llm",
+        lambda endpoint, *, timeout: timeouts.append(timeout) or object(),
+    )
+    monkeypatch.setattr(ragas_eval, "_score_one_metric", lambda *args: .5)
+    report = ragas_eval.compute_ragas_report(
+        "query", ["context"], answer="answer", metric_timeout=3
+    )
+    assert timeouts == [3, 3]
+    assert len(report["scores"]) == 2
+
+
+def test_evaluator_wrapper_uses_supplied_timeout(monkeypatch):
+    captured = {}
+
+    class FakeRunConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class FakeWrapper:
+        def __init__(self, model, *, run_config):
+            captured["model"] = model
+            captured["run_config"] = run_config
+
+    monkeypatch.setitem(sys.modules, "ragas.llms", SimpleNamespace(LangchainLLMWrapper=FakeWrapper))
+    monkeypatch.setitem(sys.modules, "ragas.run_config", SimpleNamespace(RunConfig=FakeRunConfig))
+    ragas_eval._wrap_evaluator(object(), timeout=27)
+    assert captured["timeout"] == 27
+    assert captured["max_retries"] == 0
 
 
 def test_metric_errors_are_actionable_without_provider_secrets():

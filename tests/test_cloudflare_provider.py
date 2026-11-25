@@ -9,6 +9,8 @@ from backend.integrations.cloudflare_transport import CloudflareTransport, _rout
 def test_cloudflare_default_and_shared_pacing(monkeypatch):
     monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'test-key')
     monkeypatch.setenv('CLOUDFLARE_ACCOUNT_ID', 'a' * 32)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
     monkeypatch.delenv('CLOUDFLARE_GATEWAY_ID', raising=False)
     model = llm_factory._get_cloudflare_chat()
     assert model.model_name == '@cf/zai-org/glm-4.7-flash'
@@ -18,6 +20,19 @@ def test_cloudflare_default_and_shared_pacing(monkeypatch):
     assert model.reasoning_effort == 'low'
     assert model.rate_limiter is llm_factory._cloudflare_limiter
     assert llm_factory.create_llm().rate_limiter is model.rate_limiter
+
+
+def test_automatic_provider_order_is_gemini_then_groq_then_cloudflare(monkeypatch):
+    monkeypatch.setattr(llm_factory, '_get_gemini_chat', lambda **_: 'Gemini')
+    monkeypatch.setattr(llm_factory, '_get_groq_chat', lambda **_: 'Groq')
+    monkeypatch.setattr(llm_factory, '_get_cloudflare_chat', lambda **_: 'Cloudflare')
+    assert llm_factory.create_llm() == 'Gemini'
+
+    monkeypatch.setattr(llm_factory, '_get_gemini_chat', lambda **_: None)
+    assert llm_factory.create_llm() == 'Groq'
+
+    monkeypatch.setattr(llm_factory, '_get_groq_chat', lambda **_: None)
+    assert llm_factory.create_llm() == 'Cloudflare'
 
 
 def test_gateway_uses_cloudflare_model_and_disables_cache_and_logs(monkeypatch):
@@ -51,10 +66,10 @@ def test_daily_budget_rejects_additional_attempts():
 
 
 def test_cloudflare_evaluation_has_room_for_paced_calls(monkeypatch):
-    monkeypatch.setenv('OCR_RAGAS_TIMEOUT_SECONDS', '30')
-    monkeypatch.setenv('OCR_RAGAS_METRIC_TIMEOUT_SECONDS', '12')
+    monkeypatch.setenv('OCR_RAGAS_TIMEOUT_SECONDS', '90')
+    monkeypatch.setenv('OCR_RAGAS_METRIC_TIMEOUT_SECONDS', '30')
     assert ragas_time_limits('Cloudflare') == (210, 150)
-    assert ragas_time_limits('Gemini') == (30, 12)
+    assert ragas_time_limits('Gemini') == (90, 30)
 
 
 def test_routing_keeps_host_and_tls_server_name():

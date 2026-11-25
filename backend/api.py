@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from backend.app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _ragas_tasks, _ragas_lock, _spawn_ragas_background
+from backend.app import DB_PATH, _build_and_stream, _normalize_endpoint_name, _spawn_ragas_background
 from backend.graph import build_graph
 from backend.observability import TokenCostCallback, flush_langfuse, get_langfuse_handler
 from backend.state import Finding, Verdict
@@ -246,101 +246,18 @@ def github_logout(request: Request) -> dict[str, str]:
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in job.items() if key not in {"config", "future", "request_fingerprint", "owner_id", "ragas_inputs"}}
+    private_keys = {
+        "config", "future", "request_fingerprint", "owner_id",
+    }
+    result = {
+        key: value for key, value in job.items()
+        if key not in private_keys and not key.startswith("ragas")
+    }
     now = time.time()
     result["elapsed_seconds"] = round(max(0, now - job.get("started_timestamp", now)), 1) if job.get("status") in {"processing", "queued"} else job.get("elapsed_seconds", 0)
     if job.get("status") == "queued":
         result["queue_position"] = sum(1 for item in _jobs.values() if item.get("status") == "queued" and item.get("created_at", "") <= job.get("created_at", ""))
     return result
-
-def _with_ragas(job: dict[str, Any]) -> dict[str, Any]:
-    result = _public_job(job)
-    task_id = result.get("ragas_task_id")
-    with _ragas_lock:
-        task = _ragas_tasks.get(task_id) if task_id else None
-    def finish():
-        metrics = (task or {}).get('metrics') or job.get('ragas_metrics') or {}
-        evaluation = (task or {}).get('evaluation') or job.get('ragas_evaluation') or {}
-        result.setdefault('ragas', {}).update(metrics=metrics, evaluation=evaluation)
-        if metrics and result['ragas'].get('scores') and any(m.get('status') != 'completed' for m in metrics.values()):
-            result['ragas']['status'] = 'partial'
-        if metrics != job.get('ragas_metrics', {}) or evaluation != job.get('ragas_evaluation', {}):
-            with _lock:
-                live = _jobs.get(job.get('id'))
-                if live is not None:
-                    live.update(ragas_metrics=metrics, ragas_evaluation=evaluation)
-                    _save_job(live)
-        return result
-    if not task_id:
-        result["ragas"] = {
-            "status": "skipped",
-            "scores": result.get("ragas_scores") or {},
-            "reason": "Review incomplete; scoring was not started" if result.get("status") == "incomplete" else "No retrieval context was available for RAGAS evaluation",
-        }
-    else:
-        if job.get("ragas_status") in {"failed", "unavailable", "completed_no_scores"}:
-            result["ragas"] = {
-                "status": job["ragas_status"],
-                "scores": job.get("ragas_scores") or {},
-                "error": job.get("ragas_error"),
-            }
-            return finish()
-        with _ragas_lock:
-            task = _ragas_tasks.get(task_id)
-        if not task:
-            # Task registries are process-local. A restart invalidates an
-            # in-flight task instead of making the client poll forever.
-            if result.get("ragas_scores"):
-                result["ragas"] = {"status": "completed", "scores": result["ragas_scores"]}
-            else:
-                result["ragas"] = {"status": "unavailable", "error": "RAGAS task was lost during process restart"}
-                with _lock:
-                    live = _jobs.get(job.get("id"))
-                    if live is not None:
-                        live["ragas_status"] = "unavailable"
-                        live["ragas_error"] = result["ragas"]["error"]
-                        _save_job(live)
-        elif not task.get("done"):
-            timeout = float(task.get("timeout_seconds") or os.getenv("OCR_RAGAS_TIMEOUT_SECONDS", "90"))
-            started = float(task.get("started", 0) or 0)
-            if started and datetime.now(timezone.utc).timestamp() - started > timeout:
-                result["ragas"] = {"status": "failed", "error": f"RAGAS exceeded {int(timeout)} second timeout"}
-                with _lock:
-                    live = _jobs.get(job.get("id"))
-                    if live is not None:
-                        live["ragas_status"] = "failed"
-                        live["ragas_error"] = result["ragas"]["error"]
-                        _save_job(live)
-            else:
-                result["ragas"] = {"status": "pending"}
-        elif task.get("error"):
-            result["ragas"] = {"status": "failed", "error": task.get("error")}
-            with _lock:
-                live = _jobs.get(job.get("id"))
-                if live is not None:
-                    live["ragas_status"] = "failed"
-                    live["ragas_error"] = task.get("error")
-                    _save_job(live)
-        else:
-            scores = task.get("scores") or {}
-            if scores:
-                result["ragas"] = {"status": "completed", "scores": scores}
-                if not job.get("ragas_scores"):
-                    with _lock:
-                        live = _jobs.get(job.get("id"))
-                        if live is not None:
-                            live["ragas_scores"] = scores
-                            live["ragas_status"] = "completed"
-                            _save_job(live)
-            else:
-                result["ragas"] = {"status": "completed_no_scores", "scores": {}, "error": "RAGAS completed without metric values"}
-                with _lock:
-                    live = _jobs.get(job.get("id"))
-                    if live is not None:
-                        live["ragas_status"] = "completed_no_scores"
-                        live["ragas_error"] = result["ragas"]["error"]
-                        _save_job(live)
-    return finish()
 
 
 def _run_job(job_id: str, request: ReviewRequest) -> None:
@@ -542,9 +459,9 @@ def create_review(request: ReviewRequest, http_request: Request, x_api_key: str 
         else:
             job = existing
     if existing is not None:
-        return {**_with_ragas(job), "reused": True}
+        return {**_public_job(job), "reused": True}
     job["future"] = _executor.submit(_run_job, job_id, request)
-    return _with_ragas(job)
+    return _public_job(job)
 
 
 @app.post("/api/reviews/{job_id}/cancel")
@@ -576,7 +493,7 @@ def get_review(job_id: str, request: Request, x_api_key: str | None = Header(def
     owner = str((_session(request) or {}).get("github_id") or "api-key")
     if not job or job.get("owner_id", "api-key") != owner:
         raise HTTPException(status_code=404, detail="Review not found")
-    return _with_ragas(job)
+    return _public_job(job)
 
 
 @app.post('/api/reviews/{job_id}/feedback')
